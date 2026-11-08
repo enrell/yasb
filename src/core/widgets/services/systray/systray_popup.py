@@ -48,6 +48,7 @@ class SystrayPopup(QWidget):
         self._round_corners_type = popup_config.round_corners_type
         self._border_color = popup_config.border_color
         self._is_closing = False
+        self._activate_on_show = True
         self._pos_args: tuple[str, str, int, int] | None = None
 
         # Inner frame for styling
@@ -84,6 +85,16 @@ class SystrayPopup(QWidget):
     def is_visible(self) -> bool:
         return self.isVisible() and not self._is_closing
 
+    def activate(self) -> None:
+        """Give focus to an already visible popup so it closes on outside clicks again."""
+        self._activate_on_show = True
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+        if self.isVisible():
+            self.activateWindow()
+
+    def contains_cursor(self) -> bool:
+        return self.isVisible() and self._popup_rect().contains(QCursor.pos())
+
     def add_icon(self, icon: IconWidget) -> None:
         self._grid_widget.add_icon_to_grid(icon)
 
@@ -92,7 +103,15 @@ class SystrayPopup(QWidget):
             return
         self.hide_animated() if self.is_visible else self.open(label_expanded)
 
-    def open(self, label_expanded: str) -> None:
+    def open(self, label_expanded: str, activate: bool = True) -> None:
+        """Show the popup.
+
+        With ``activate=False`` (used by hover expansion) the popup does not take focus
+        from the foreground window, so the owner must close it on mouse leave instead of
+        relying on deactivation.
+        """
+        self._activate_on_show = activate
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, not activate)
         self._grid_widget.relayout_grid()
         self.show()
         self._grid_widget.updateGeometry()
@@ -184,7 +203,8 @@ class SystrayPopup(QWidget):
             pass
         self.setWindowOpacity(0.0)
         super().showEvent(event)
-        self.activateWindow()
+        if self._activate_on_show:
+            self.activateWindow()
 
         self._fade_animation.setStartValue(0.0)
         self._fade_animation.setEndValue(1.0)

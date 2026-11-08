@@ -26,6 +26,8 @@ class SystrayWidgetConfig(CustomBaseModel):
     show_in_popup: bool = False
     icons_per_row: int = Field(default=5, ge=1, le=12)
     popup: SystrayPopupConfig = SystrayPopupConfig()
+    expand_on_hover: bool = False
+    collapse_delay: int = Field(default=400, ge=0, le=10000)
     show_battery: bool = False
     show_volume: bool = False
     show_network: bool = False
