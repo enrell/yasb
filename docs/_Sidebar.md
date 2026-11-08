@@ -61,6 +61,7 @@
     - [Todo](./(Widget)-Todo)
     - [Traffic](./(Widget)-Traffic)
     - [Update Check](./(Widget)-Update-Check)
+    - [Vertigo Workspaces](./(Widget)-Vertigo-Workspaces)
     - [Visual Studio Code](./(Widget)-VSCode)
     - [Volume](./(Widget)-Volume)
     - [Wallpapers](./(Widget)-Wallpapers)
