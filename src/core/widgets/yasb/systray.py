@@ -6,12 +6,15 @@ from typing import Any, override
 from uuid import UUID
 
 from PyQt6.QtCore import (
+    QEvent,
+    QObject,
     QPoint,
     Qt,
     QThread,
     QTimer,
     pyqtSlot,
 )
+from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
@@ -225,6 +228,17 @@ class SystrayWidget(BaseWidget):
             self.unpinned_vis_btn.setVisible(self.config.show_unpinned_button)
 
         self.widget_layout.addWidget(self.widget_container)
+
+        # Hover expansion: the unpinned icons open while the mouse is over the tray and
+        # close collapse_delay ms after it leaves, so moving onto them keeps them open.
+        self._hover_expanded = False
+        self._collapse_timer = QTimer(self)
+        self._collapse_timer.setSingleShot(True)
+        self._collapse_timer.setInterval(self.config.collapse_delay)
+        self._collapse_timer.timeout.connect(self._collapse_if_idle)
+        if self.config.expand_on_hover:
+            for target in self._hover_targets():
+                target.installEventFilter(self)
 
         QTimer.singleShot(0, self.load_state)
         if self.config.use_hook:
@@ -532,6 +546,14 @@ class SystrayWidget(BaseWidget):
 
     def toggle_unpinned_widget_visibility(self):
         """On button click, toggle the visibility of the unpinned widget."""
+        if self._hover_expanded:
+            # A click on a hover-expanded tray keeps it open until the next click.
+            self._hover_expanded = False
+            self._collapse_timer.stop()
+            if self.config.show_in_popup:
+                self._systray_popup.activate()
+            self._set_expanded_button_state(True)
+            return
         if self.config.show_in_popup:
             self._systray_popup.toggle(self.config.label_expanded)
         else:
@@ -541,6 +563,78 @@ class SystrayWidget(BaseWidget):
             else:
                 self.unpinned_widget.setVisible(False)
                 self.unpinned_vis_btn.setText(self.config.label_collapsed)
+
+    def _hover_targets(self) -> list[QObject]:
+        """Widgets whose hover opens the unpinned icons.
+
+        Inline mode uses the whole tray. Popup mode uses the toggle button and the popup,
+        so pinned icons can still be reached without opening the grid.
+        """
+        if self.config.show_in_popup:
+            return [self.unpinned_vis_btn, self._systray_popup]
+        return [self]
+
+    def _hover_enabled(self) -> bool:
+        if not self.config.expand_on_hover:
+            return False
+        # Inline without the toggle button: unpinned icons are always shown.
+        return self.config.show_in_popup or self.config.show_unpinned_button
+
+    def is_unpinned_expanded(self) -> bool:
+        if self.config.show_in_popup:
+            return self._systray_popup.is_visible
+        return not self.unpinned_widget.isHidden()
+
+    def _set_expanded_button_state(self, expanded: bool) -> None:
+        self.unpinned_vis_btn.setChecked(expanded)
+        self.unpinned_vis_btn.setText(self.config.label_expanded if expanded else self.config.label_collapsed)
+
+    @override
+    def eventFilter(self, a0: QObject | None, a1: QEvent | None) -> bool:
+        if a1 is not None and self._hover_enabled():
+            if a1.type() == QEvent.Type.Enter:
+                self.on_hover_enter()
+            elif a1.type() == QEvent.Type.Leave:
+                self.on_hover_leave()
+        return super().eventFilter(a0, a1)
+
+    def on_hover_enter(self) -> None:
+        """Open the unpinned icons when the mouse reaches the tray."""
+        self._collapse_timer.stop()
+        if self.is_unpinned_expanded():
+            return
+        self._hover_expanded = True
+        if self.config.show_in_popup:
+            self._systray_popup.open(self.config.label_expanded, activate=False)
+        else:
+            self.unpinned_widget.setVisible(True)
+            self._set_expanded_button_state(True)
+
+    def on_hover_leave(self) -> None:
+        """Start the collapse delay; entering the tray or the popup again cancels it."""
+        if self._hover_expanded:
+            self._collapse_timer.start()
+
+    def _cursor_over_tray(self) -> bool:
+        cursor = QCursor.pos()
+        if self.isVisible() and self.rect().contains(self.mapFromGlobal(cursor)):
+            return True
+        return self.config.show_in_popup and self._systray_popup.contains_cursor()
+
+    def _collapse_if_idle(self) -> None:
+        if not self._hover_expanded:
+            return
+        # Leave events can be missed while a drag or a native menu holds the mouse, so
+        # check where the cursor really is and look again after another delay.
+        if IconWidget.drag_in_progress or self._cursor_over_tray():
+            self._collapse_timer.start()
+            return
+        self._hover_expanded = False
+        if self.config.show_in_popup:
+            self._systray_popup.hide_animated()
+        else:
+            self.unpinned_widget.setVisible(False)
+            self._set_expanded_button_state(False)
 
     def sort_icons(self):
         """Sorts pinned and unpinned widgets based on their state index"""

@@ -55,6 +55,7 @@
     - [Quick Launch](./(Widget)-Quick-Launch)
     - [Recycle Bin](./(Widget)-Recycle-Bin)
     - [Server Monitor](./(Widget)-Server-Monitor)
+    - [Super Player](./(Widget)-Super-Player)
     - [Systray](./(Widget)-Systray)
     - [Taskbar](./(Widget)-Taskbar)
     - [Todo](./(Widget)-Todo)

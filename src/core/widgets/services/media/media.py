@@ -5,7 +5,7 @@ import threading
 import time
 from collections.abc import Callable
 from functools import partial
-from typing import Any
+from typing import Any, Literal
 
 import PyQt6.sip as sip
 from PIL import Image
@@ -65,6 +65,7 @@ class SessionState:
         self.app_id = app_id
         self.title = ""
         self.artist = ""
+        self.album = ""
         self.last_snapshot_pos = 0.0
         self.last_update_time = 0.0
         self.duration = 0.0
@@ -300,6 +301,7 @@ class WindowsMedia(QObject, metaclass=QSingleton):
             with self._smtc_lock:
                 title = props.title or ""
                 artist = props.artist or ""
+                album = props.album_title or ""
                 thumb_ref = props.thumbnail
             del props
 
@@ -314,6 +316,7 @@ class WindowsMedia(QObject, metaclass=QSingleton):
                 return
             state.title = title
             state.artist = artist
+            state.album = album
             state.thumbnail = thumbnail
             self.media_properties_changed.emit()
         except Exception as e:
@@ -558,9 +561,12 @@ class WindowsMedia(QObject, metaclass=QSingleton):
 
         self.current_session_changed.emit()
 
-    async def _invoke_session_async(self, starter: Callable[[MediaSession], Any]) -> None:
-        """Start a session async op under the SMTC lock, await outside the lock."""
-        state = self.current_session
+    async def _invoke_session_async(self, starter: Callable[[MediaSession], Any], app_id: str | None = None) -> None:
+        """Start a session async op under the SMTC lock, await outside the lock.
+
+        Acts on the current session, or on the session of ``app_id`` when given.
+        """
+        state = self.current_session if app_id is None else self._trackers.get(app_id)
         if state is None or state.session is None:
             return
         with self._smtc_lock:
@@ -621,14 +627,28 @@ class WindowsMedia(QObject, metaclass=QSingleton):
         except Exception as e:
             logger.error("Error cycling repeat: %s", e)
 
-    async def seek_to_position(self, position: float):
-        """Seek to specific position in seconds."""
+    async def session_command(self, app_id: str, command: Literal["play_pause", "prev", "next"]) -> None:
+        """Run a transport command on a specific session instead of the current one."""
+        starters: dict[str, Callable[[MediaSession], Any]] = {
+            "play_pause": lambda s: s.try_toggle_play_pause_async(),
+            "prev": lambda s: s.try_skip_previous_async(),
+            "next": lambda s: s.try_skip_next_async(),
+        }
         try:
-            state = self.current_session
+            await self._invoke_session_async(starters[command], app_id)
+        except Exception as e:
+            logger.error("Error running %s on %s: %s", command, app_id, e)
+
+    async def seek_to_position(self, position: float, app_id: str | None = None):
+        """Seek to specific position in seconds (current session, or ``app_id``'s)."""
+        try:
+            state = self.current_session if app_id is None else self._trackers.get(app_id)
             if state is None or state.session is None:
                 return
             position_in_100ns = int(position * 10_000_000)  # Seconds -> 100-nanosecond units
-            await self._invoke_session_async(lambda s: s.try_change_playback_position_async(position_in_100ns))
+            await self._invoke_session_async(
+                lambda s: s.try_change_playback_position_async(position_in_100ns), state.app_id
+            )
             state.last_snapshot_pos = position
             state.last_update_time = time.time()
             self._interpolate_and_emit(self._trackers)

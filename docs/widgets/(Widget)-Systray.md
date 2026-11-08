@@ -15,6 +15,8 @@ Puts your system tray icons directly in the status bar. You can pin important ic
 | `show_in_popup`             | boolean   | `false`       | Show unpinned icons in a popup grid instead of inline in the bar.                                                             |
 | `icons_per_row`             | integer   | `5`           | Number of icon columns in the popup grid, 1-12 (only used when `show_in_popup` is true).                                      |
 | `popup`                     | dict      | [See below](#popup-options) | Popup appearance settings (only used when `show_in_popup` is true).                                                           |
+| `expand_on_hover`           | boolean   | `false`       | Open the unpinned icons while the mouse is over the tray, inline or in the popup. See [Expand on hover](#expand-on-hover).    |
+| `collapse_delay`            | integer   | `400`         | Milliseconds to wait after the mouse leaves before closing hover-opened icons, 0-10000 (only used with `expand_on_hover`).    |
 | `show_battery`              | boolean   | `false`       | Whether to show battery icon (from the original systray).                                                                     |
 | `show_volume`               | boolean   | `false`       | Whether to show volume icon (from the original systray).                                                                      |
 | `show_network`              | boolean   | `false`       | Whether to show network icon (from the original systray).                                                                     |
@@ -81,6 +83,27 @@ systray:
       offset_left: 0
 ```
 
+## Expand on hover
+With `expand_on_hover: true` the unpinned icons open when the mouse reaches the tray, so you don't need to click the collapse button. It works in both modes:
+
+- **Inline:** hovering anywhere on the tray shows the unpinned icons next to the pinned ones. This needs `show_unpinned_button: true`; without the button the unpinned icons are always shown anyway.
+- **Popup** (`show_in_popup: true`): hovering the collapse button opens the popup grid. Pinned icons don't open it, so you can still reach them. A popup opened by hover doesn't take focus from the window you're working in.
+
+When the mouse leaves, the icons close after `collapse_delay` milliseconds. Moving onto the expanded icons, or onto the popup across the gap below the bar, within that time keeps them open. The tray also stays open while you drag an icon, or while the cursor is still over it.
+
+Clicking the collapse button while the icons are open from a hover keeps them open until the next click, like before. Icons you open with a click are never closed by the hover logic.
+
+```yaml
+systray:
+  type: "yasb.systray.SystrayWidget"
+  options:
+    label_collapsed: "▼"
+    label_expanded: "▶"
+    show_unpinned: false
+    expand_on_hover: true
+    collapse_delay: 400 # ms after the mouse leaves the tray
+```
+
 ## Systray Widget Limitations:
 There are some limitations with the systray widget:
 - Systray widget will not show icons for apps if they ignore "TaskbarCreated" message. Meaning that if the original developers decided to ignore this message - their systray icons will not be shown. It's rare, but there are such cases (NVIDIA App for example). This is NOT a YASB bug.
@@ -101,6 +124,8 @@ The systray hook is a more reliable and performant way to monitor systray icons.
 - **show_in_popup:** When enabled, unpinned icons are shown in a popup grid (like Windows system tray overflow) instead of inline. Clicking the expand/collapse button opens the popup. Pinned icons remain in the bar.
 - **icons_per_row:** Number of columns in the popup icon grid. Only used when `show_in_popup` is true. Can be 1-12.
 - **popup:** Popup window appearance settings. Only used when `show_in_popup` is true. See Popup Options table above.
+- **expand_on_hover:** Open the unpinned icons while the mouse is over the tray (inline) or over the collapse button (popup), and close them again after `collapse_delay`. See [Expand on hover](#expand-on-hover).
+- **collapse_delay:** How long, in milliseconds, hover-opened icons stay open after the mouse leaves. Moving back onto the tray or the popup in that time cancels the collapse.
 - **show_battery:** Whether to show battery icon (from the original systray).
 - **show_volume:** Whether to show volume icon (from the original systray).
 - **show_network:** Whether to show network icon (from the original systray).
