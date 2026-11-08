@@ -67,8 +67,9 @@ from core.widgets.base import BaseWidget
 from core.widgets.services.media.media import SessionState, WindowsMedia
 from core.widgets.services.media.source_apps import resolve_source_app_name
 from core.widgets.services.super_player.app_volume import AppVolume
+from core.widgets.services.super_player.candidates import has_non_latin
 from core.widgets.services.super_player.lrc import LyricLine, index_at
-from core.widgets.services.super_player.lyrics import LyricsCache, LyricsResult, TrackQuery
+from core.widgets.services.super_player.lyrics import LyricsCache, LyricsResult, TrackQuery, result_for
 from core.widgets.services.super_player.player import SyncClock, can_seek, has_timeline, pick_session, track_key
 from core.widgets.services.super_player.romanize import pykakasi_installed
 from core.widgets.services.super_player.settings_store import (
@@ -97,6 +98,8 @@ MAX_TIMELINE = 604800  # a week: longer "durations" are live streams
 _lyrics_cache = LyricsCache(50)
 _translation_cache = LyricsCache(50)
 _romanization_cache = LyricsCache(50)
+# The LRCLIB candidate the user picked for a track (track key -> candidate id).
+_choice_cache = LyricsCache(200)
 
 # Translation targets offered in the settings view, as in the original plugin.
 LANGUAGES: list[tuple[str, str]] = [
@@ -144,6 +147,15 @@ STRINGS: dict[str, dict[str, str]] = {
         "translate": "Translation",
         "translate_to": "Translate to",
         "lyrics": "Lyrics",
+        "lyrics_choice": "Lyrics {index} of {count}",
+        "lyrics_choice_tooltip": "LRCLIB has {count} versions of these lyrics. Switch if this one is a translation or another version.",
+        "status_nothing_to_romanize": "nothing to romanize in these lyrics",
+        "hint_nothing_to_romanize": "These lyrics have no characters to romanize (Latin script only).",
+        "script_latin": "Latin",
+        "script_cjk": "Japanese/Chinese",
+        "script_hangul": "Korean",
+        "script_cyrillic": "Cyrillic",
+        "script_greek": "Greek",
         "bar": "Bar",
         "bar_lyric": "Lyric line",
         "bar_track": "Track",
@@ -188,6 +200,15 @@ STRINGS: dict[str, dict[str, str]] = {
         "translate": "Tradução",
         "translate_to": "Traduzir para",
         "lyrics": "Letra",
+        "lyrics_choice": "Letra {index} de {count}",
+        "lyrics_choice_tooltip": "O LRCLIB tem {count} versões desta letra. Troque se esta for uma tradução ou outra versão.",
+        "status_nothing_to_romanize": "letra sem caracteres para romanizar",
+        "hint_nothing_to_romanize": "Esta letra não tem caracteres para romanizar (só alfabeto latino).",
+        "script_latin": "latim",
+        "script_cjk": "japonês/chinês",
+        "script_hangul": "coreano",
+        "script_cyrillic": "cirílico",
+        "script_greek": "grego",
         "bar": "Barra",
         "bar_lyric": "Linha da letra",
         "bar_track": "Faixa",
@@ -655,6 +676,8 @@ class SuperPlayerWidget(BaseWidget):
 
         # Lyrics
         self._lines: list[LyricLine] = []
+        self._result: LyricsResult | None = None
+        self.status_text = ""  # the popup header status, before eliding
         self._status: LyricsStatus = "noplayer"
         self._lrclib_duration = 0.0
         self._index = -1
@@ -880,6 +903,7 @@ class SuperPlayerWidget(BaseWidget):
         self._position = start
         self._index = -1
         self._lines = []
+        self._result = None
         self._lrclib_duration = 0.0
         self._lyrics_rid = self._translate_rid = self._romanize_rid = 0
         self._translate_lang = ""
@@ -902,7 +926,7 @@ class SuperPlayerWidget(BaseWidget):
             return
         cached = None if force else _lyrics_cache.get(self._key)
         if isinstance(cached, LyricsResult):
-            self._apply_lyrics(cached)
+            self._apply_lyrics(self._with_remembered_choice(cached))
             return
         self._status = "loading"
         self._rebuild_popup_lyrics()
@@ -925,9 +949,37 @@ class SuperPlayerWidget(BaseWidget):
             result = LyricsResult("error")
         if result.status != "error":
             _lyrics_cache.put(self._key, result)
-        self._apply_lyrics(result)
+        self._apply_lyrics(self._with_remembered_choice(result))
+
+    def _with_remembered_choice(self, result: LyricsResult) -> LyricsResult:
+        """The candidate the user picked for this track last time, if it is still offered."""
+        picked = _choice_cache.get(self._key)
+        for index, candidate in enumerate(result.candidates):
+            if candidate.id == picked and index != result.choice:
+                return result_for(result.candidates, index)
+        return result
+
+    def select_candidate(self, step: int) -> None:
+        """Switch to the previous/next LRCLIB candidate and remember it for this track."""
+        result = self._result
+        if result is None or len(result.candidates) < 2:
+            return
+        index = (result.choice + step) % len(result.candidates)
+        _choice_cache.put(self._key, result.candidates[index].id)
+        self._apply_lyrics(result_for(result.candidates, index))
+
+    def _lyrics_key(self) -> str:
+        """Romanization and translation belong to one candidate's lyrics, not just the track."""
+        result = self._result
+        if result is not None and result.candidates:
+            return f"{self._key}#{result.candidates[result.choice].id}"
+        return self._key
 
     def _apply_lyrics(self, result: LyricsResult) -> None:
+        self._result = result
+        # Work for the previous lyrics no longer applies.
+        self._romanize_rid = self._translate_rid = 0
+        self._translate_status = ""
         # Copies, so romanization and translation never leak into the shared cache.
         self._lines = [replace(line) for line in result.lines]
         self._status = result.status
@@ -942,10 +994,13 @@ class SuperPlayerWidget(BaseWidget):
     def _texts(self) -> list[str]:
         return [line.text for line in self._lines]
 
+    def _nothing_to_romanize(self) -> bool:
+        return bool(self._lines) and not any(has_non_latin(line.text) for line in self._lines)
+
     def _schedule_romanize(self) -> None:
-        if self.config.romanize == "off" or not self._lines or self._romanize_rid:
+        if self.config.romanize == "off" or not self._lines or self._romanize_rid or self._nothing_to_romanize():
             return
-        cached = _romanization_cache.get(self._key)
+        cached = _romanization_cache.get(self._lyrics_key())
         if isinstance(cached, list):
             self._merge("romanized", cached)  # pyright: ignore[reportUnknownArgumentType]
             return
@@ -957,7 +1012,7 @@ class SuperPlayerWidget(BaseWidget):
         if request_id != self._romanize_rid or not isinstance(result, list):
             return
         self._romanize_rid = 0
-        _romanization_cache.put(self._key, result)
+        _romanization_cache.put(self._lyrics_key(), result)
         self._merge("romanized", result)  # pyright: ignore[reportUnknownArgumentType]
         self._rebuild_popup_lyrics()
 
@@ -965,7 +1020,7 @@ class SuperPlayerWidget(BaseWidget):
         language = self.config.translate.strip()
         if language.lower() == "off" or not language or not self._lines:
             return
-        cache_key = f"{self._key}|{language}"
+        cache_key = f"{self._lyrics_key()}|{language}"
         cached = _translation_cache.get(cache_key)
         if isinstance(cached, list):
             self._translate_status = "ok"
@@ -987,7 +1042,7 @@ class SuperPlayerWidget(BaseWidget):
             self._refresh_popup()
             self._refresh_settings()
             return
-        _translation_cache.put(f"{self._key}|{self._translate_lang}", result)
+        _translation_cache.put(f"{self._lyrics_key()}|{self._translate_lang}", result)
         self._translate_status = "ok"
         self._refresh_settings()
         self._merge("translated", result)  # pyright: ignore[reportUnknownArgumentType]
@@ -1138,6 +1193,7 @@ class SuperPlayerWidget(BaseWidget):
         self._volume_slider.setVisible(False)
         controls.addWidget(self._volume_slider)
         self._status_label = plain_label("", "status")
+        self._status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         controls.addWidget(self._status_label, 1)
         info.addLayout(controls)
         header_layout.addLayout(info, 1)
@@ -1207,6 +1263,21 @@ class SuperPlayerWidget(BaseWidget):
         lyrics_page_layout.addWidget(self._empty)
 
         # Seek bar: click anywhere to jump, press and drag to scrub
+        # Switch between LRCLIB candidates: "‹ Lyrics 1 of 3 · Japanese/Chinese ›"
+        self._choice_row = QFrame()
+        self._choice_row.setProperty("class", "lyrics-choice")
+        choice_layout = QHBoxLayout(self._choice_row)
+        choice_layout.setContentsMargins(0, 4, 0, 4)
+        choice_layout.setSpacing(6)
+        choice_layout.addStretch(1)
+        choice_layout.addWidget(ClickLabel("‹", "btn choice-prev", lambda: self.select_candidate(-1)))
+        self._choice_label = plain_label("", "choice-label")
+        choice_layout.addWidget(self._choice_label)
+        choice_layout.addWidget(ClickLabel("›", "btn choice-next", lambda: self.select_candidate(1)))
+        choice_layout.addStretch(1)
+        self._choice_row.setVisible(False)
+        lyrics_page_layout.addWidget(self._choice_row)
+
         self._seek = AbsoluteSlider("seek-slider")
         self._seek.committed.connect(self._on_seek_committed)
         lyrics_page_layout.addWidget(self._seek)
@@ -1295,7 +1366,17 @@ class SuperPlayerWidget(BaseWidget):
             status = status or self._t("status_translate_error")
         elif session is not None and not has_timeline(session) and self._status == "synced":
             status = self._t("status_estimated")  # no timeline from the player: local clock
-        self._status_label.setText(status)
+        elif self.config.romanize != "off" and self._nothing_to_romanize():
+            status = self._t("status_nothing_to_romanize")
+        # Long statuses are cut to the row; the tooltip keeps the whole text.
+        self.status_text = status
+        width = max(20, self._status_label.width())
+        shown = QFontMetrics(self._status_label.font()).elidedText(status, Qt.TextElideMode.ElideRight, width)
+        if self._status_label.text() != shown:
+            self._status_label.setText(shown)
+            if shown != status:
+                set_tooltip(self._status_label, html.escape(status))
+        self._refresh_choice()
 
         if self._cover is not None:
             self._refresh_cover()
@@ -1306,6 +1387,22 @@ class SuperPlayerWidget(BaseWidget):
         self._seek.setEnabled(seekable)
         if duration > 0:
             self._seek.set_ratio(self._position / duration)
+
+    def _refresh_choice(self) -> None:
+        result = self._result
+        count = len(result.candidates) if result is not None else 0
+        visible = count > 1
+        if visible != (not self._choice_row.isHidden()):
+            self._choice_row.setVisible(visible)
+            self._fit_popup()
+        if not visible or result is None:
+            return
+        picked = result.candidates[result.choice]
+        script = self._t(f"script_{picked.script}") if f"script_{picked.script}" in STRINGS["en"] else picked.script
+        text = f"{self._t('lyrics_choice').format(index=result.choice + 1, count=count)} · {script}"
+        if self._choice_label.text() != text:
+            self._choice_label.setText(text)
+            set_tooltip(self._choice_label, html.escape(self._t("lyrics_choice_tooltip").format(count=count)))
 
     def _refresh_cover(self) -> None:
         if self._cover is None:
@@ -1632,11 +1729,13 @@ class SuperPlayerWidget(BaseWidget):
             chip.setVisible(states["romanize"])
         for _, chip in self._chips.get("translate_to", []):
             chip.setVisible(states["translate"])
-        self._romanize_hint.setText(
-            (self._t("hint_pykakasi") if pykakasi_installed() else self._t("hint_builtin"))
-            if states["romanize"]
-            else ""
-        )
+        if not states["romanize"]:
+            romanize_hint = ""
+        elif self._nothing_to_romanize():
+            romanize_hint = self._t("hint_nothing_to_romanize")
+        else:
+            romanize_hint = self._t("hint_pykakasi") if pykakasi_installed() else self._t("hint_builtin")
+        self._romanize_hint.setText(romanize_hint)
         self._romanize_hint.setVisible(states["romanize"])
         hint = {
             "loading": "hint_translating",

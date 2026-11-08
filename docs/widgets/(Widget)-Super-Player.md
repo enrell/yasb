@@ -136,7 +136,15 @@ Defaults are Nerd Font Material Design icons, the same as the original plugin.
 ## How it works
 
 1. **Player.** The widget reads every GSMTC session from YASB's media service and picks one with `source`. Controls, seeking and volume always act on that player, even when another widget follows a different one.
-2. **Lyrics.** A track change starts a lookup after 250 ms, so the player can finish publishing its metadata. The lookup runs on a background thread, in order: the exact `GET /api/get` (artist and title, plus album and duration when the player reports them), the filtered `GET /api/search`, then the free text `GET /api/search?q=`. Players that report no artist go straight to the free text search. Candidates prefer synced lyrics and a duration close to the track (within 25 s for synced, 10 s for unsynced) so live versions and remixes don't match. Network failures are retried twice. Results are cached in memory for the last 50 tracks.
+2. **Lyrics.** A track change starts a lookup after 250 ms, so the player can finish publishing its metadata. The lookup runs on a background thread and collects candidates from the exact `GET /api/get` (artist and title, plus album and duration when the player reports them), the filtered `GET /api/search` and the free text `GET /api/search?q=`. Players that report no artist only use the free text search. LRCLIB is crowd-sourced, so the first match can be someone's translation; every candidate is ranked instead:
+   - synced lyrics first;
+   - the original script: when a candidate of the right length is in a non-Latin script (Japanese/Chinese, Korean, Cyrillic, Greek...), it beats a Latin-only one;
+   - a Latin candidate timed line for line like a non-Latin one is treated as its translation and loses;
+   - a duration within 2 s, then the closest duration (at most 25 s off for synced, 10 s for unsynced, so live versions and remixes don't match).
+
+   When only Latin lyrics turn up under the title, the player may be showing a localized or English title (TIDAL shows Sheena Ringo's 心中 as "A Double Suicide"). The widget then searches the artist's catalogue: if most of it is in a non-Latin script, that script is preferred, and a track of the same length (±2 s) joins the candidates. Duplicate uploads collapse into one. Network failures are retried twice, and results are cached in memory for the last 50 tracks.
+
+   When LRCLIB has more than one candidate, a **"Lyrics 1 of N · script"** switcher above the seek bar moves between them; the pick is remembered for that track.
 3. **Clock.** With a timeline from the player, the highlighted line follows the player's position and re-anchors only on jumps over 1.5 s (seek, loop, restart), so it doesn't flicker at line boundaries. Some players, mostly browsers, publish no timeline: then a local clock starts when the track changes and runs while it plays. That clock is an estimate, right when the track starts from the beginning; the popup header says "estimated timing" and lines can't be clicked to seek. The progress bar then uses the duration LRCLIB reports.
 4. **Volume.** GSMTC has no volume, so the widget changes the player's own audio sessions in the Windows mixer, found by AUMID and then by exe name. Mute is the mixer's real mute. When no audio session matches (the player hasn't played sound yet), the volume controls are disabled.
 
@@ -146,6 +154,7 @@ Defaults are Nerd Font Material Design icons, the same as the original plugin.
 
 - **Japanese** with readings for kanji needs [pykakasi](https://pypi.org/project/pykakasi/). It is not a YASB dependency; when running from source, install the pinned optional extra with `pip install -e .[lyrics]`. The widget uses it only when it can be imported, and the settings view says which romanizer is in use.
 - **Kana, Hangul, Cyrillic and Greek** are romanized with built-in tables. Without pykakasi, kanji are left as they are.
+- When the chosen lyrics are Latin only, the header says "nothing to romanize in these lyrics" instead of silently doing nothing; the switcher may offer the original-script version.
 
 ## Translation
 
@@ -190,6 +199,9 @@ Every request is abandoned after 8 s, and a reply larger than 512 KiB is refused
 .super-player-popup .empty .message {}
 .super-player-popup .retry {} /* "Try again" button */
 .super-player-popup .seek-slider {} /* A QSlider like .volume-slider */
+.super-player-popup .lyrics-choice {} /* "‹ Lyrics 1 of N · script ›" row, shown with 2+ candidates */
+.super-player-popup .lyrics-choice .choice-label {}
+.super-player-popup .btn.choice-prev, .super-player-popup .btn.choice-next {}
 .super-player-popup .btn.settings {} /* Gear button; .btn.settings.active while the settings view is open */
 .super-player-popup .settings {} /* Settings view */
 .super-player-popup .settings-title {}

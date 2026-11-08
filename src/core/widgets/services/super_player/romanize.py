@@ -224,6 +224,15 @@ def _pykakasi() -> Any | None:
         return None
 
 
+_SPACE_BEFORE = re.compile(r"\s+([,.!?;:)\]」』])")
+_SPACE_AFTER = re.compile(r"([(\[「『])\s+")
+
+
+def _tidy(text: str) -> str:
+    """pykakasi spaces punctuation like words: "nee , doushite" -> "nee, doushite"."""
+    return _SPACE_AFTER.sub(r"\1", _SPACE_BEFORE.sub(r"\1", text))
+
+
 def pykakasi_installed() -> bool:
     """Cheap check for the settings hint; does not load pykakasi's dictionaries."""
     try:
@@ -246,7 +255,7 @@ def romanize_lines(lines: Sequence[str], kakasi: Callable[[], Any | None] = _pyk
             try:
                 tokens = converter.convert(line)
                 words = " ".join(str(token["hepburn"]).strip() for token in tokens if token["hepburn"])
-                out.append(" ".join(words.split()))
+                out.append(_tidy(" ".join(words.split())))
                 continue
             except Exception:
                 pass

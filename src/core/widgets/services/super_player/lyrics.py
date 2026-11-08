@@ -1,14 +1,16 @@
 """LRCLIB lookup, translation and a small lyrics cache.
 
 Everything here is blocking and runs on a worker thread (see ``worker.py``), never on
-the UI thread. Ported from PlayerService.qml in omarchy-super-player.
+the UI thread. Based on PlayerService.qml in omarchy-super-player.
 
-Lookup order, as in the original:
-    1. exact ``GET /api/get`` (artist + track, plus album and duration when known)
-    2. filtered ``GET /api/search`` (track + artist)
-    3. free text ``GET /api/search?q=``
-Players that report no artist go straight to the free text search, since LRCLIB
-rejects an empty artist. Network failures are retried twice.
+The original took the first match of: exact ``GET /api/get``, filtered
+``GET /api/search``, free text ``GET /api/search?q=``. LRCLIB is crowd-sourced, so the
+first match can be a user-submitted translation; here every endpoint adds candidates
+and ``candidates.rank_candidates`` picks the order (synced, original script, not a
+translation, duration). When nothing in a non-Latin script turns up for an artist
+whose catalogue mostly is (a localized or English title), the artist's catalogue is
+searched for a track of the same length. Players that report no artist go straight to
+the free text search. Network failures are retried twice.
 """
 
 import json
@@ -22,6 +24,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from core.widgets.services.super_player.candidates import (
+    CLOSE_DELTA,
+    Candidate,
+    artist_script,
+    candidate_from,
+    rank_candidates,
+)
 from core.widgets.services.super_player.lrc import LyricLine, parse_lrc, parse_plain
 
 logger = logging.getLogger("super_player")
@@ -37,11 +46,6 @@ REQUEST_TIMEOUT = 8.0
 MAX_RESPONSE_BYTES = 512 * 1024
 NETWORK_RETRIES = 2
 RETRY_DELAY = 1.5
-
-# A large duration gap usually means another version (live, remix) whose timings
-# would not match the audio.
-MAX_SYNCED_DELTA = 25.0
-MAX_PLAIN_DELTA = 10.0
 
 # Translation requests carry the lyrics in the URL; long lyrics are sent in chunks.
 MAX_TRANSLATE_CHARS = 1500
@@ -64,6 +68,9 @@ class LyricsResult:
     lines: list[LyricLine] = field(default_factory=lambda: list[LyricLine]())
     # Duration LRCLIB reports for the match; used for progress when the player has none.
     duration: float = 0.0
+    # Every acceptable LRCLIB candidate, best first; ``choice`` is the one in ``lines``.
+    candidates: list[Candidate] = field(default_factory=lambda: list[Candidate]())
+    choice: int = 0
 
 
 def bounded_get(url: str, timeout: float = REQUEST_TIMEOUT, max_bytes: int = MAX_RESPONSE_BYTES) -> tuple[int, bytes]:
@@ -106,55 +113,24 @@ def _json(body: bytes) -> Any:
         return None
 
 
-def _number(value: Any) -> float:
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
-
-
-def _text(value: Any) -> str:
-    return value if isinstance(value, str) else ""
-
-
-def pick_best(results: Sequence[Any], duration: float) -> dict[str, Any] | None:
-    """Pick the best search candidate: synced lyrics first, then the closest duration."""
-    best_synced: dict[str, Any] | None = None
-    best_synced_delta = float("inf")
-    best_plain: dict[str, Any] | None = None
-    best_plain_delta = float("inf")
-
-    for result in results:
-        if not isinstance(result, dict):
-            continue
-        candidate: dict[str, Any] = result  # pyright: ignore[reportUnknownVariableType]
-        delta = abs(_number(candidate.get("duration")) - duration)
-        if _text(candidate.get("syncedLyrics")):
-            if delta < best_synced_delta:
-                best_synced, best_synced_delta = candidate, delta
-        elif _text(candidate.get("plainLyrics")):
-            if delta < best_plain_delta:
-                best_plain, best_plain_delta = candidate, delta
-
-    if best_synced is not None and (duration <= 0 or best_synced_delta <= MAX_SYNCED_DELTA):
-        return best_synced
-    if best_plain is not None and (duration <= 0 or best_plain_delta <= MAX_PLAIN_DELTA):
-        return best_plain
-    return None
-
-
-def result_from_api(data: Any) -> LyricsResult:
-    """Turn one LRCLIB record into lines."""
-    if not isinstance(data, dict):
-        return LyricsResult("error")
-    record: dict[str, Any] = data  # pyright: ignore[reportUnknownVariableType]
-    duration = _number(record.get("duration"))
-    synced = parse_lrc(_text(record.get("syncedLyrics")))
+def result_for(candidates: list[Candidate], choice: int = 0) -> LyricsResult:
+    """Lines of one ranked candidate, keeping the whole list for the popup's switcher."""
+    if not candidates:
+        return LyricsResult("notfound")
+    choice = max(0, min(choice, len(candidates) - 1))
+    picked = candidates[choice]
+    synced = parse_lrc(picked.synced)
     if synced:
-        return LyricsResult("synced", synced, duration)
-    plain = _text(record.get("plainLyrics"))
-    if plain.strip():
-        return LyricsResult("plain", parse_plain(plain), duration)
-    if record.get("instrumental") is True:
-        return LyricsResult("instrumental", [], duration)
-    return LyricsResult("notfound", [], duration)
+        return LyricsResult("synced", synced, picked.duration, candidates, choice)
+    if picked.plain.strip():
+        return LyricsResult("plain", parse_plain(picked.plain), picked.duration, candidates, choice)
+    return LyricsResult("notfound", [], picked.duration, candidates, choice)
+
+
+def pick_best(results: Sequence[Any], duration: float) -> Candidate | None:
+    """The best LRCLIB record of a list, or None when none fits the track."""
+    ranked = rank_candidates((c for r in results if (c := candidate_from(r)) is not None), duration)
+    return ranked[0] if ranked else None
 
 
 def _url(path: str, **params: str) -> str:
@@ -171,14 +147,35 @@ def _get_with_retries(get: Getter, url: str, sleep: Callable[[float], None]) -> 
     return status, body
 
 
+def _records(status: int, body: bytes) -> list[Any]:
+    if status != 200:
+        return []
+    data = _json(body)
+    if isinstance(data, list):
+        return list(data)  # pyright: ignore[reportUnknownArgumentType]
+    return [data] if isinstance(data, dict) else []
+
+
 def fetch_lyrics(
     query: TrackQuery, get: Getter = bounded_get, sleep: Callable[[float], None] = time.sleep
 ) -> LyricsResult:
-    """Look the track up on LRCLIB. Blocking; call it from a worker thread."""
+    """Look the track up on LRCLIB and rank every candidate. Blocking; call it from a worker thread."""
     if not query.title.strip():
         return LyricsResult("notfound")
 
     artist = query.artist.strip()
+    found: list[Candidate] = []
+    instrumental = False
+    answered = False
+
+    def add(records: list[Any], source: str) -> None:
+        nonlocal instrumental
+        for record in records:
+            candidate = candidate_from(record, source)
+            if candidate is None:
+                continue
+            instrumental = instrumental or (candidate.instrumental and not candidate.has_lyrics)
+            found.append(candidate)
 
     if artist:
         params = {"artist_name": artist, "track_name": query.title}
@@ -187,26 +184,41 @@ def fetch_lyrics(
         if query.duration > 0:
             params["duration"] = str(round(query.duration))
         status, body = _get_with_retries(get, _url("get", **params), sleep)
-        if status == 200:
-            result = result_from_api(_json(body))
-            if result.status != "error":
-                return result
         if status == 0:
             return LyricsResult("error")  # offline: the search endpoints would fail too
+        answered = True
+        add(_records(status, body), "get")
 
         status, body = get(_url("search", track_name=query.title, artist_name=artist))
-        if status == 200:
-            data = _json(body)
-            best = pick_best(data if isinstance(data, list) else [], query.duration)  # pyright: ignore[reportUnknownArgumentType]
-            if best is not None:
-                return result_from_api(best)
+        answered = answered or status != 0
+        add(_records(status, body), "search")
 
     status, body = _get_with_retries(get, _url("search", q=f"{query.title} {artist}".strip()), sleep)
-    if status == 200:
-        data = _json(body)
-        best = pick_best(data if isinstance(data, list) else [], query.duration)  # pyright: ignore[reportUnknownArgumentType]
-        return result_from_api(best) if best is not None else LyricsResult("notfound")
-    return LyricsResult("error" if status == 0 else "notfound")
+    answered = answered or status != 0
+    add(_records(status, body), "search")
+
+    hint: str | None = None
+    close = [c for c in found if query.duration > 0 and abs(c.duration - query.duration) <= CLOSE_DELTA]
+    if artist and not any(c.script != "latin" for c in close or found):
+        # Only Latin lyrics under this title: the player may show a localized or English
+        # title. Look at the artist's catalogue for its script and a track of this length.
+        status, body = get(_url("search", q=artist))
+        records = _records(status, body)
+        hint = artist_script(records)
+        if hint is not None and query.duration > 0:
+            add([r for r in records if _close_duration(r, query.duration)], "artist")
+
+    ranked = rank_candidates(found, query.duration, hint)
+    if ranked:
+        return result_for(ranked)
+    if instrumental:
+        return LyricsResult("instrumental")
+    return LyricsResult("notfound" if answered else "error")
+
+
+def _close_duration(record: Any, duration: float) -> bool:
+    candidate = candidate_from(record)
+    return candidate is not None and abs(candidate.duration - duration) <= CLOSE_DELTA
 
 
 def parse_translation(body: bytes) -> str:

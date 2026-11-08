@@ -207,19 +207,22 @@ def test_pick_best_prefers_synced_lyrics_close_to_the_track():
     far = _record(synced="[00:01.00] far", duration=300)
     near = _record(synced="[00:01.00] near", duration=205)
     plain = _record(plain="plain", duration=200)
-    assert pick_best([plain, far, near], 200) is near
+    best = pick_best([plain, far, near], 200)
+    assert best is not None and best.synced == near["syncedLyrics"]
 
 
 def test_pick_best_rejects_other_versions():
     assert pick_best([_record(synced="[00:01.00] live", duration=260)], 200) is None
     assert pick_best([_record(plain="x", duration=215)], 200) is None
     plain = _record(plain="x", duration=205)
-    assert pick_best([plain], 200) is plain
+    best = pick_best([plain], 200)
+    assert best is not None and best.plain == "x"
 
 
 def test_pick_best_without_a_known_duration_takes_any_match():
     record = _record(synced="[00:01.00] x", duration=999)
-    assert pick_best([record, "junk", None], 0) is record
+    best = pick_best([record, "junk", None], 0)
+    assert best is not None and best.duration == 999
 
 
 class FakeGetter:
@@ -258,7 +261,8 @@ def test_missing_exact_match_falls_back_to_search_then_free_text():
     get = FakeGetter({"get": [(404, None)], "search": [(200, [])], "q": [(200, [_record(plain="words", duration=0)])]})
     result = fetch_lyrics(TrackQuery("Song", "Artist"), get, _no_sleep)
     assert result.status == "plain" and result.lines[0].text == "words"
-    assert [urllib.parse.urlparse(c).path for c in get.calls] == ["/api/get", "/api/search", "/api/search"]
+    # get, filtered search, free text, then the artist's catalogue (only Latin lyrics found)
+    assert [urllib.parse.urlparse(c).path for c in get.calls] == ["/api/get"] + ["/api/search"] * 3
 
 
 def test_players_without_artist_go_straight_to_free_text():
@@ -627,19 +631,20 @@ def _line_texts(widget: Any) -> list[list[str]]:
 
 
 def test_turning_romanization_and_translation_on_adds_lines_live(widget_env: Any):
+    widget_env[2].result = LyricsResult("synced", parse_lrc("[00:05.00] <b>心中</b>\n[00:10.00] second"), 200)
     widget = _popup_with_lyrics(widget_env)
-    assert _line_texts(widget) == [["<b>first</b>"], ["second"]]
+    assert _line_texts(widget) == [["<b>心中</b>"], ["second"]]
 
     widget.update_settings(romanize="below")
     widget._on_translate_switch(True)  # the toggle uses translate_to, pt-BR by default
     lines = widget._line_widgets
     assert _line_texts(widget) == [
-        ["<b>first</b>", "r:<b>first</b>", "pt-BR:<b>first</b>"],
+        ["<b>心中</b>", "r:<b>心中</b>", "pt-BR:<b>心中</b>"],
         ["second", "r:second", "pt-BR:second"],
     ]
     assert all(label.textFormat() == Qt.TextFormat.PlainText for line in lines for label in line.labels())
     assert "current" in lines[0].property("class")  # the highlight survives the re-render
-    assert widget._label.text() == "pt-BR:<b>first</b>"  # the bar prefers the translation
+    assert widget._label.text() == "pt-BR:<b>心中</b>"  # the bar prefers the translation
 
     _feed(widget, widget_env[1], current_pos=11.0)
     assert "current" in widget._line_widgets[1].property("class")
@@ -649,7 +654,7 @@ def test_turning_romanization_and_translation_on_adds_lines_live(widget_env: Any
 
     widget.update_settings(romanize="off")
     widget._on_translate_switch(False)
-    assert _line_texts(widget) == [["<b>first</b>"], ["second"]]
+    assert _line_texts(widget) == [["<b>心中</b>"], ["second"]]
     widget._popup.hide()
 
 
@@ -741,3 +746,197 @@ def test_settings_view_shrinks_when_translation_turns_off(widget_env: Any):
     QApplication.processEvents()
     assert popup.height() == closed
     popup.hide()
+
+
+# --- choosing among LRCLIB candidates ----------------------------------------------------
+
+JAPANESE_LRC = (
+    "[00:10.00] ねえ、如何して目を合わさうともしないの？\n"
+    "[00:15.00] 屹度「直視に耐へない」とでも云ふ\n"
+    "[00:20.00] 然う云ふ事なのね\n"
+    "[00:25.00] 誰が私を女にしたの"
+)
+ENGLISH_LRC = (
+    "[00:10.00] Hey—why won't you even try to meet my eyes?\n"
+    "[00:15.00] You can't bear to look straight at me, that's what you'd say\n"
+    "[00:20.00] So that's how it is\n"
+    "[00:25.00] Who was it, really? Who turned me into a woman"
+)
+UNRELATED_LRC = "[00:03.00] la la\n[00:31.00] na na\n[00:47.00] oh\n[01:02.00] yeah"
+
+
+def _lrclib(id: int, synced: str, duration: float, track: str = "A Double Suicide") -> dict[str, Any]:
+    return {
+        "id": id,
+        "trackName": track,
+        "artistName": "Sheena Ringo",
+        "albumName": "Reimport Vol.2 Civil Aviation Bureau",
+        "duration": duration,
+        "instrumental": False,
+        "syncedLyrics": synced,
+        "plainLyrics": None,
+    }
+
+
+def _candidates(*records: dict[str, Any], source: str = "search") -> list[Any]:
+    from core.widgets.services.super_player.candidates import candidate_from
+
+    return [c for r in records if (c := candidate_from(r, source)) is not None]
+
+
+def test_script_detection():
+    from core.widgets.services.super_player.candidates import has_non_latin, script_of
+
+    assert script_of(JAPANESE_LRC) == "cjk"
+    assert script_of(ENGLISH_LRC) == "latin"
+    assert script_of("[00:01.00] 사랑해요 baby") == "hangul"
+    assert script_of("Я люблю тебя") == "cyrillic"
+    assert script_of("Ça va, señor — naïve café") == "latin"
+    assert script_of("") == "latin"
+    assert script_of("I love you so much, 好き") == "latin"  # a stray word is not the song's script
+    assert has_non_latin("I love you so much, 好き") and not has_non_latin("café")
+
+
+def test_an_english_line_by_line_version_is_a_translation():
+    from core.widgets.services.super_player.candidates import looks_like_translation
+
+    english, japanese, unrelated = _candidates(
+        _lrclib(1, ENGLISH_LRC, 192.68), _lrclib(2, JAPANESE_LRC, 193.0), _lrclib(3, UNRELATED_LRC, 193.0)
+    )
+    assert looks_like_translation(english, japanese)
+    assert not looks_like_translation(unrelated, japanese)
+    assert not looks_like_translation(japanese, english)
+
+
+def test_original_japanese_beats_its_english_translation_with_the_same_duration():
+    from core.widgets.services.super_player.candidates import rank_candidates
+
+    english = _candidates(_lrclib(19680341, ENGLISH_LRC, 192.68), source="get")
+    japanese = _candidates(_lrclib(19712511, JAPANESE_LRC, 193.0))
+    ranked = rank_candidates(english + japanese, 192.68)
+    assert [c.id for c in ranked] == [19712511, 19680341]  # the translation stays as a choice
+
+
+def test_duplicate_uploads_collapse_and_wrong_lengths_are_dropped():
+    from core.widgets.services.super_player.candidates import rank_candidates
+
+    ranked = rank_candidates(
+        _candidates(
+            _lrclib(1, JAPANESE_LRC, 193.0),
+            _lrclib(2, JAPANESE_LRC, 192.0),  # same lyrics, other album tag
+            _lrclib(3, ENGLISH_LRC, 50.0),  # partial upload
+        ),
+        192.68,
+    )
+    assert [c.id for c in ranked] == [1]
+
+
+def test_latin_songs_keep_the_closest_synced_match():
+    from core.widgets.services.super_player.candidates import rank_candidates
+
+    ranked = rank_candidates(
+        _candidates(_lrclib(1, UNRELATED_LRC, 205.0), _lrclib(2, ENGLISH_LRC, 200.5)), 200.0, artist_hint=None
+    )
+    assert [c.id for c in ranked] == [2, 1]
+
+
+def test_artist_catalogue_script_breaks_a_tie_for_localized_titles():
+    from core.widgets.services.super_player.candidates import artist_script, rank_candidates
+
+    catalogue = [_lrclib(10 + i, JAPANESE_LRC.replace("ねえ", f"曲{i}"), 200.0 + i, f"Song {i}") for i in range(4)]
+    assert artist_script(catalogue) == "cjk"
+    assert artist_script([_lrclib(1, ENGLISH_LRC, 1.0)]) is None  # too little to tell
+    english = _candidates(_lrclib(1, ENGLISH_LRC, 192.68), source="get")
+    from_artist = _candidates(_lrclib(2, JAPANESE_LRC, 192.0, "心中"), source="artist")
+    assert [c.id for c in rank_candidates(english + from_artist, 192.68, "cjk")] == [2, 1]
+
+
+def test_fetch_ranks_every_endpoint_and_keeps_all_candidates():
+    get = FakeGetter(
+        {
+            "get": [(200, _lrclib(19680341, ENGLISH_LRC, 192.68))],
+            "search": [(200, [_lrclib(19680341, ENGLISH_LRC, 192.68), _lrclib(19712511, JAPANESE_LRC, 193.0)])],
+            "q": [(200, [])],
+        }
+    )
+    result = fetch_lyrics(TrackQuery("A Double Suicide", "Sheena Ringo", "", 192.68), get, _no_sleep)
+    assert result.status == "synced" and result.lines[0].text.startswith("ねえ")
+    assert [c.id for c in result.candidates] == [19712511, 19680341] and result.choice == 0
+    assert not any(
+        "q=Sheena+Ringo" in call and "Suicide" not in call for call in get.calls
+    )  # no catalogue search needed
+
+
+def test_fetch_searches_the_artist_catalogue_when_the_title_is_localized():
+    catalogue = [_lrclib(10 + i, JAPANESE_LRC.replace("ねえ", f"曲{i}"), 230.0 + i, f"曲{i}") for i in range(4)]
+    catalogue.append(_lrclib(2, JAPANESE_LRC, 192.0, "心中"))
+    english = _lrclib(1, ENGLISH_LRC, 192.68)
+
+    def get(url: str) -> tuple[int, bytes]:
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        if url.split("?")[0].endswith("/get"):
+            return 200, json.dumps(english).encode()
+        if query.get("q") == ["Sheena Ringo"]:
+            return 200, json.dumps(catalogue).encode()
+        return 200, json.dumps([english]).encode()
+
+    result = fetch_lyrics(TrackQuery("A Double Suicide", "Sheena Ringo", "", 192.68), get, _no_sleep)
+    assert [c.id for c in result.candidates] == [2, 1]  # same length, artist's script; other songs dropped
+
+
+def test_widget_switches_candidates_and_remembers_the_pick(widget_env: Any):
+    from core.widgets.services.super_player.lyrics import result_for
+
+    make, media, worker = widget_env
+    ranked = _candidates(_lrclib(2, JAPANESE_LRC, 193.0), _lrclib(1, ENGLISH_LRC, 192.68))
+    worker.result = result_for(ranked)
+    widget = make(ui_language="pt")
+    widget._loop = None
+    _feed(widget, media, current_pos=11.0)
+    widget._load()
+    widget._show_popup()
+    _feed(widget, media, current_pos=11.0)
+    assert widget._choice_row.isVisibleTo(widget._popup)
+    assert widget._choice_label.text() == "Letra 1 de 2 · japonês/chinês"
+    assert widget._lines[0].text.startswith("ねえ")
+
+    widget.select_candidate(1)
+    _feed(widget, media, current_pos=11.0)
+    assert widget._lines[0].text.startswith("Hey")
+    assert widget._choice_label.text() == "Letra 2 de 2 · latim"
+    assert "current" in widget._line_widgets[0].property("class")
+
+    widget._popup.hide()
+    restarted = make()
+    _feed(restarted, media, current_pos=11.0)
+    restarted._load()  # served from the cache, with the pick remembered for this track
+    assert restarted._lines[0].text.startswith("Hey")
+
+
+def test_romanizing_latin_lyrics_says_there_is_nothing_to_do(widget_env: Any):
+    make, media, worker = widget_env
+    worker.result = LyricsResult("synced", parse_lrc(ENGLISH_LRC), 200)
+    calls: list[int] = []
+
+    def no_romanize(request_id: int, texts: list[str]) -> None:
+        calls.append(request_id)
+
+    worker.romanize = no_romanize  # pyright: ignore[reportAttributeAccessIssue]
+    widget = make(ui_language="pt", romanize="below")
+    _feed(widget, media, current_pos=11.0)
+    widget._load()
+    widget._show_popup()
+    _feed(widget, media, current_pos=11.0)
+    assert calls == []
+    assert widget.status_text == "letra sem caracteres para romanizar"
+    widget._show_settings(True)
+    assert widget._romanize_hint.text().startswith("Esta letra não tem caracteres")
+    widget._popup.hide()
+
+
+def test_romaji_punctuation_is_not_spaced_like_words():
+    class Kakasi:
+        def convert(self, text: str) -> list[dict[str, str]]:
+            return [{"hepburn": "nee"}, {"hepburn": ","}, {"hepburn": "("}, {"hepburn": "naze"}, {"hepburn": ")"}]
+
+    assert romanize_lines(["ねえ、（何故）"], kakasi=Kakasi) == ["nee, (naze)"]
