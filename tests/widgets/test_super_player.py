@@ -1,10 +1,12 @@
 # pyright: reportPrivateUsage=false
 
 import http.server
+import json
 import threading
 import urllib.parse
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -453,12 +455,15 @@ class FakeWorker(QObject):
         self.translation_ready.emit(request_id, [f"{language}:{t}" for t in texts])
 
     def romanize(self, request_id: int, texts: list[str]) -> None:
-        self.romanization_ready.emit(request_id, texts)
+        self.romanization_ready.emit(request_id, [f"r:{t}" for t in texts])
 
 
 @pytest.fixture
-def widget_env(qapp: QApplication, monkeypatch: pytest.MonkeyPatch):
+def widget_env(qapp: QApplication, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     from core.widgets.yasb import super_player as module
+
+    state_file = tmp_path / "super-player.json"
+    monkeypatch.setattr(module, "state_path", lambda: state_file)
 
     media = FakeMedia()
     worker = FakeWorker(LyricsResult("synced", parse_lrc("[00:05.00] <b>first</b>\n[00:10.00] second"), 200))
@@ -572,3 +577,167 @@ def test_players_without_a_timeline_are_not_seekable(widget_env: Any):
     widget._load()
     widget.seek_to(10.0)
     assert media.seeks == [] and widget._status == "synced"
+
+
+# --- settings saved from the popup -------------------------------------------------------
+
+
+def test_state_file_missing_or_broken_counts_as_empty(tmp_path: Path):
+    from core.widgets.services.super_player.settings_store import load_state
+
+    assert load_state(tmp_path / "nope.json") == {}
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+    assert load_state(broken) == {}
+    broken.write_text("[1, 2]", encoding="utf-8")
+    assert load_state(broken) == {}
+
+
+def test_saving_keeps_other_widgets_and_only_editable_keys(tmp_path: Path):
+    from core.widgets.services.super_player.settings_store import load_state, save_overrides
+
+    path = tmp_path / "super-player.json"
+    save_overrides(path, "other", {"romanize": "below"})
+    save_overrides(path, "super_player", {"translate": "en", "max_label_width": 999})
+    assert load_state(path) == {"other": {"romanize": "below"}, "super_player": {"translate": "en"}}
+
+
+def test_saved_values_override_config_yaml_and_bad_ones_are_skipped():
+    from core.widgets.services.super_player.settings_store import apply_overrides
+
+    base = SuperPlayerConfig.model_validate({"romanize": "off", "translate": "off", "show_progress": True})
+    result = apply_overrides(base, {"romanize": "below", "show_progress": False, "bar_label": "nonsense"})
+    assert (result.romanize, result.show_progress, result.bar_label) == ("below", False, "lyric")
+    assert base.romanize == "off"  # config.yaml values are untouched
+
+
+def _popup_with_lyrics(widget_env: Any, **options: Any) -> Any:
+    make, media, _ = widget_env
+    widget = make(**options)
+    widget._loop = None
+    _feed(widget, media, current_pos=6.0)
+    widget._load()
+    widget._show_popup()
+    _feed(widget, media, current_pos=6.0)
+    return widget
+
+
+def _line_texts(widget: Any) -> list[list[str]]:
+    return [[label.text() for label in line.labels()] for line in widget._line_widgets]
+
+
+def test_turning_romanization_and_translation_on_adds_lines_live(widget_env: Any):
+    widget = _popup_with_lyrics(widget_env)
+    assert _line_texts(widget) == [["<b>first</b>"], ["second"]]
+
+    widget.update_settings(romanize="below")
+    widget._on_translate_switch(True)  # the toggle uses translate_to, pt-BR by default
+    lines = widget._line_widgets
+    assert _line_texts(widget) == [
+        ["<b>first</b>", "r:<b>first</b>", "pt-BR:<b>first</b>"],
+        ["second", "r:second", "pt-BR:second"],
+    ]
+    assert all(label.textFormat() == Qt.TextFormat.PlainText for line in lines for label in line.labels())
+    assert "current" in lines[0].property("class")  # the highlight survives the re-render
+    assert widget._label.text() == "pt-BR:<b>first</b>"  # the bar prefers the translation
+
+    _feed(widget, widget_env[1], current_pos=11.0)
+    assert "current" in widget._line_widgets[1].property("class")
+
+    widget._on_language_chip("en")
+    assert _line_texts(widget)[1] == ["second", "r:second", "en:second"]
+
+    widget.update_settings(romanize="off")
+    widget._on_translate_switch(False)
+    assert _line_texts(widget) == [["<b>first</b>"], ["second"]]
+    widget._popup.hide()
+
+
+def test_settings_view_toggles_and_shows_the_state(widget_env: Any):
+    widget = _popup_with_lyrics(widget_env, ui_language="pt")
+    widget._show_settings(True)
+    assert widget._settings_page.isVisibleTo(widget._popup) and not widget._lyrics_page.isVisibleTo(widget._popup)
+    switch = widget._switches["translate"]
+    assert not switch.isChecked() and switch.text() == "Desligado"
+    switch.click()
+    assert widget.config.translate == "pt-BR" and switch.isChecked() and switch.text() == "Ligado"
+    chips = dict(widget._chips["translate_to"])
+    assert chips["pt-BR"].isChecked()
+    chips["ja"].click()
+    assert widget.config.translate == "ja" and chips["ja"].isChecked() and not chips["pt-BR"].isChecked()
+    sources = dict(widget._chips["source"])
+    assert set(sources) == {"auto", "Spotify.exe"} and sources["auto"].isChecked()
+    widget._show_settings(False)
+    assert widget._lyrics_page.isVisibleTo(widget._popup)
+    widget._popup.hide()
+
+
+def test_translation_is_only_requested_while_enabled(widget_env: Any):
+    _, _, worker = widget_env
+    calls: list[str] = []
+    original = worker.translate
+
+    def spy(request_id: int, texts: list[str], language: str) -> None:
+        calls.append(language)
+        original(request_id, texts, language)
+
+    worker.translate = spy
+    widget = _popup_with_lyrics(widget_env)
+    widget.update_settings(translate_to="es")
+    assert calls == []
+    widget._on_translate_switch(True)
+    widget._on_translate_switch(False)
+    widget._on_translate_switch(True)  # cached per track and language: no second request
+    assert calls == ["es"]
+    widget._popup.hide()
+
+
+def test_settings_persist_across_restarts_without_touching_config(widget_env: Any):
+    from core.widgets.yasb import super_player as module
+
+    make, _, _ = widget_env
+    widget = make(show_progress=True)
+    widget.widget_name = "super_player"
+    widget.update_settings(romanize="below", translate="en", translate_to="en", show_progress=True)
+    saved = json.loads(module.state_path().read_text(encoding="utf-8"))
+    # show_progress matches config.yaml, so it is not stored
+    assert saved == {"super_player": {"romanize": "below", "translate": "en", "translate_to": "en"}}
+
+    restarted = make(show_progress=True)
+    restarted.widget_name = "super_player"
+    assert restarted.config.romanize == "off"
+    restarted._load_saved_settings()
+    assert (restarted.config.romanize, restarted.config.translate) == ("below", "en")
+    assert restarted._base_config.romanize == "off"
+
+
+def test_popup_keeps_its_size_across_views_and_tracks(widget_env: Any):
+    widget = _popup_with_lyrics(widget_env)
+    popup = widget._popup
+    popup.show()
+    height = popup.height()
+    widget._show_settings(True)
+    widget._switches["romanize"].click()
+    widget._switches["translate"].click()
+    widget._show_settings(False)
+    _feed(widget, widget_env[1], current_pos=1.0, title="Other")  # loading view
+    widget._load()  # back to lines, with romanized and translated rows
+    assert popup.height() == height  # the hidden empty view must not leave its height behind
+    assert len(widget._line_widgets) == 2
+    popup.hide()
+
+
+def test_settings_view_shrinks_when_translation_turns_off(widget_env: Any):
+    widget = _popup_with_lyrics(widget_env)
+    popup = widget._popup
+    popup.show()
+    widget._show_settings(True)
+    QApplication.processEvents()
+    closed = popup.height()
+    widget._switches["translate"].click()
+    QApplication.processEvents()
+    assert popup.height() > closed  # the language chips appear
+    widget._switches["translate"].click()
+    QApplication.processEvents()
+    assert popup.height() == closed
+    popup.hide()

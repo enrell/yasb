@@ -11,6 +11,7 @@ The original plugin used pykakasi, kakasi or ICU ``uconv``; on Windows the last 
 are rarely available, so the tables stand in for ICU.
 """
 
+import importlib.util
 import re
 from collections.abc import Callable, Sequence
 from functools import cache
@@ -223,6 +224,14 @@ def _pykakasi() -> Any | None:
         return None
 
 
+def pykakasi_installed() -> bool:
+    """Cheap check for the settings hint; does not load pykakasi's dictionaries."""
+    try:
+        return importlib.util.find_spec("pykakasi") is not None
+    except ImportError, ValueError:
+        return False
+
+
 def available_tool() -> str:
     """Which romanizer will be used for Japanese: ``pykakasi`` or ``builtin``."""
     return "pykakasi" if _pykakasi() is not None else "builtin"
@@ -236,7 +245,8 @@ def romanize_lines(lines: Sequence[str], kakasi: Callable[[], Any | None] = _pyk
         if converter is not None and JAPANESE.search(line):
             try:
                 tokens = converter.convert(line)
-                out.append(" ".join(str(token["hepburn"]) for token in tokens if token["hepburn"]).strip())
+                words = " ".join(str(token["hepburn"]).strip() for token in tokens if token["hepburn"])
+                out.append(" ".join(words.split()))
                 continue
             except Exception:
                 pass

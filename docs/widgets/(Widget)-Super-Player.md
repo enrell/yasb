@@ -16,6 +16,8 @@ This widget is a YASB port of [omarchy-super-player](https://github.com/enrell/o
 | `hide_when_no_lyrics` | boolean | `false` | Hide the widget while no synced line is being sung, instead of showing the track title. |
 | `romanize` | string | `"off"` | `off`, `replace` (show only the romanized line) or `below` (romanized line under the original). See [Romanization](#romanization). |
 | `translate` | string | `"off"` | `off` or a language code (`pt-BR`, `en`, `es`, `fr`, `de`, `it`, `ja`, `ko`, `zh-CN`, `ru`, ...). See [Translation](#translation). |
+| `translate_to` | string | `"pt-BR"` | Language the translation switch in the settings view turns on. |
+| `ui_language` | string | `"en"` | Language of the popup and settings text: `en` or `pt`. |
 | `tooltip` | boolean | `true` | Tooltip with `title — artist` on hover, and the new level when you scroll the volume. |
 | `volume_step` | integer | `5` | Volume change per mouse wheel step, in percent, 1-25. |
 | `icons` | dict | [See below](#icons) | Icons used in the bar and the popup. |
@@ -47,7 +49,7 @@ super_player:
     callbacks:
       on_left: "toggle_popup"
       on_middle: "toggle_play_pause"
-      on_right: "do_nothing"
+      on_right: "open_settings"
 ```
 
 ## Usage
@@ -55,6 +57,7 @@ super_player:
 | Interaction | Action |
 | --- | --- |
 | Left click | Open or close the popup |
+| Right click | Open the popup on its settings view |
 | Middle click | Play/pause |
 | Mouse wheel | Volume of the player, with a tooltip showing the new level |
 | Hover | Tooltip with `title — artist` |
@@ -69,8 +72,20 @@ Inside the popup:
 | Volume bar | Click or drag to set the level |
 | Seek bar (bottom) | Click anywhere to jump there, press and drag to scrub |
 | Click a lyric line | Seek to that line |
+| Gear button (header) | Open or close the settings view |
 
-The widget hides itself while no player is running. Settings live in `config.yaml` like any other widget; with `watch_config: true` YASB reloads them when you save.
+The widget hides itself while no player is running.
+
+## Settings view
+
+The gear button in the popup header, or a right click on the widget, opens the settings view, like the original plugin's settings page:
+
+- **Player:** `Automatic` or one of the players running now (pins `source`).
+- **Romanization:** on/off switch, then *below the line* or *instead of the line*. The line under the switch says which romanizer is in use.
+- **Translation:** on/off switch and, while it is on, the target language (`translate_to`). Turning it on is the only thing that sends lyrics to Google Translate; the line under the switch shows the status, including failures.
+- **Bar:** lyric line / track / icon only, the progress line, and hiding the widget without lyrics.
+
+Changes apply immediately: the lyrics re-render with the romanized and translated lines under each original line, and the current-line highlight keeps going. They are saved in `super-player.json` next to `config.yaml` (one section per widget name) and survive restarts. `config.yaml` is never rewritten: its values are the defaults, and the saved values override them. A value set back to what `config.yaml` says is removed from the file, and deleting the file resets everything to `config.yaml`.
 
 ## Popup Options
 
@@ -102,6 +117,8 @@ Defaults are Nerd Font Material Design icons, the same as the original plugin.
 | `pause` | `\U000f03e4` | Pause button and cover overlay |
 | `volume` | `\U000f057e` | Mute button while audible |
 | `muted` | `\U000f0581` | Mute button while muted |
+| `settings` | `\U000f0493` | Gear button in the popup header |
+| `back` | `\U000f004d` | Back button in the settings view |
 
 ## Callbacks
 
@@ -112,6 +129,7 @@ Defaults are Nerd Font Material Design icons, the same as the original plugin.
 | `next_track` | Next track. |
 | `prev_track` | Previous track. |
 | `toggle_mute` | Mute or unmute the followed player. |
+| `open_settings` | Open the popup on its settings view (closes it when already there). |
 | `reload_lyrics` | Look the lyrics up again, ignoring the cache. |
 | `do_nothing` | Nothing. |
 
@@ -126,7 +144,7 @@ Defaults are Nerd Font Material Design icons, the same as the original plugin.
 
 `romanize: below` or `replace` transliterates the lyrics to Latin script once per track, on a background thread:
 
-- **Japanese** with readings for kanji needs [pykakasi](https://pypi.org/project/pykakasi/). YASB doesn't ship or install it; the widget uses it only when it can be imported.
+- **Japanese** with readings for kanji needs [pykakasi](https://pypi.org/project/pykakasi/). It is not a YASB dependency; when running from source, install the pinned optional extra with `pip install -e .[lyrics]`. The widget uses it only when it can be imported, and the settings view says which romanizer is in use.
 - **Kana, Hangul, Cyrillic and Greek** are romanized with built-in tables. Without pykakasi, kanji are left as they are.
 
 ## Translation
@@ -172,6 +190,18 @@ Every request is abandoned after 8 s, and a reply larger than 512 KiB is refused
 .super-player-popup .empty .message {}
 .super-player-popup .retry {} /* "Try again" button */
 .super-player-popup .seek-slider {} /* A QSlider like .volume-slider */
+.super-player-popup .btn.settings {} /* Gear button; .btn.settings.active while the settings view is open */
+.super-player-popup .settings {} /* Settings view */
+.super-player-popup .settings-title {}
+.super-player-popup .back {} /* "Back" button (a QPushButton) */
+.super-player-popup .section-title {} /* PLAYER, LYRICS, BAR */
+.super-player-popup .section {} /* Card around each group of settings */
+.super-player-popup .divider {} /* 1px line between rows of a card */
+.super-player-popup .setting-label {}
+.super-player-popup .setting-desc {} /* Line under a label: romanizer in use, translation status; .error when it failed */
+.super-player-popup .switch {} /* Painted on/off switch: set qproperty-onColor, qproperty-offColor, qproperty-knobColor */
+.super-player-popup .chip {} /* Language buttons; :checked is the selected one */
+.super-player-popup .segment {} /* Joined option buttons (player, mode, bar label); .first/.last ends, :checked */
 ```
 
 ## Example CSS
@@ -274,6 +304,60 @@ A knobless look like the original, with colors from CSS variables so it follows 
 .super-player-popup .seek-slider:hover::groove:horizontal {
     height: 4px;
 }
+/* Settings view */
+.super-player-popup .section-title {
+    color: var(--sp-accent);
+    font-size: 10px;
+    font-weight: 800;
+}
+.super-player-popup .section {
+    background-color: rgba(36, 40, 59, 0.75);
+    border: 1px solid rgba(86, 95, 137, 0.35);
+    border-radius: 8px;
+}
+.super-player-popup .divider {
+    background-color: rgba(86, 95, 137, 0.35);
+}
+.super-player-popup .setting-desc {
+    color: var(--sp-dim);
+    font-size: 10px;
+}
+.super-player-popup .setting-desc.error {
+    color: #f7768e;
+}
+.super-player-popup .switch {
+    qproperty-onColor: #7aa2f7;
+    qproperty-offColor: #3b4261;
+    qproperty-knobColor: #c0caf5;
+}
+.super-player-popup .chip {
+    border: 1px solid rgba(86, 95, 137, 0.45);
+    border-radius: 10px;
+    padding: 3px 0;
+    font-size: 11px;
+}
+.super-player-popup .chip:checked {
+    background-color: var(--sp-accent);
+    color: #1a1b26;
+}
+.super-player-popup .segment {
+    border: 1px solid rgba(86, 95, 137, 0.45);
+    border-left: none;
+    padding: 4px 6px;
+    font-size: 11px;
+}
+.super-player-popup .segment.first {
+    border-left: 1px solid rgba(86, 95, 137, 0.45);
+    border-top-left-radius: 6px;
+    border-bottom-left-radius: 6px;
+}
+.super-player-popup .segment.last {
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+}
+.super-player-popup .segment:checked {
+    background-color: rgba(122, 162, 247, 0.22);
+}
 ```
 
 ## Limitations
@@ -282,7 +366,7 @@ A knobless look like the original, with colors from CSS variables so it follows 
 - Unsynced lyrics are listed without a highlight; the header says "unsynced lyrics".
 - Browsers often report the channel as the artist and `Artist - Song` as the title, which can miss the exact lookup; the free text search usually still finds it.
 - Players without a timeline only get an estimated position (see [How it works](#how-it-works)).
-- Settings are not editable from the popup like in the original; edit `config.yaml` instead.
+- The settings view covers the options that make sense on Windows; label width and the popup layout stay in `config.yaml`.
 
 ## Credits
 

@@ -13,6 +13,8 @@ class SuperPlayerIconsConfig(CustomBaseModel):
     pause: str = "\U000f03e4"
     volume: str = "\U000f057e"
     muted: str = "\U000f0581"
+    settings: str = "\U000f0493"
+    back: str = "\U000f004d"
 
 
 class SuperPlayerPopupConfig(CustomBaseModel):
@@ -33,7 +35,7 @@ class SuperPlayerPopupConfig(CustomBaseModel):
 class SuperPlayerCallbacksConfig(CallbacksConfig):
     on_left: str = "toggle_popup"
     on_middle: str = "toggle_play_pause"
-    on_right: str = "do_nothing"
+    on_right: str = "open_settings"
 
 
 class SuperPlayerConfig(CustomBaseModel):
@@ -47,6 +49,8 @@ class SuperPlayerConfig(CustomBaseModel):
     hide_when_no_lyrics: bool = False
     romanize: Literal["off", "replace", "below"] = "off"
     translate: str = "off"
+    translate_to: str = "pt-BR"
+    ui_language: Literal["en", "pt"] = "en"
     tooltip: bool = True
     volume_step: int = Field(default=5, ge=1, le=25)
     icons: SuperPlayerIconsConfig = SuperPlayerIconsConfig()

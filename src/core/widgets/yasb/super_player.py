@@ -17,6 +17,7 @@ from collections.abc import Callable, Coroutine
 from dataclasses import replace
 from typing import Any, Literal, override
 
+import PyQt6.QtCore as QtCore
 from PIL import Image
 from PIL.ImageQt import ImageQt
 from PyQt6.QtCore import (
@@ -44,6 +45,7 @@ from PyQt6.QtGui import (
     QWheelEvent,
 )
 from PyQt6.QtWidgets import (
+    QAbstractButton,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -68,9 +70,20 @@ from core.widgets.services.super_player.app_volume import AppVolume
 from core.widgets.services.super_player.lrc import LyricLine, index_at
 from core.widgets.services.super_player.lyrics import LyricsCache, LyricsResult, TrackQuery
 from core.widgets.services.super_player.player import SyncClock, can_seek, has_timeline, pick_session, track_key
+from core.widgets.services.super_player.romanize import pykakasi_installed
+from core.widgets.services.super_player.settings_store import (
+    EDITABLE_KEYS,
+    apply_overrides,
+    load_state,
+    save_overrides,
+    state_path,
+)
 from core.widgets.services.super_player.worker import LyricsWorker
 
 logger = logging.getLogger("super_player")
+
+# pyqtProperty exists at runtime but is missing from the PyQt6 type stubs (as in bar_style.py)
+pyqtProperty: Callable[..., Any] = getattr(QtCore, "pyqtProperty")
 
 type LyricsStatus = Literal["noplayer", "loading", "synced", "plain", "notfound", "instrumental", "error"]
 
@@ -85,20 +98,111 @@ _lyrics_cache = LyricsCache(50)
 _translation_cache = LyricsCache(50)
 _romanization_cache = LyricsCache(50)
 
-EMPTY_MESSAGES: dict[str, str] = {
-    "noplayer": "No player running.\nStart something and press play.",
-    "loading": "Fetching lyrics…",
-    "notfound": "No lyrics found on LRCLIB.",
-    "instrumental": "Instrumental.",
-    "error": "Could not fetch the lyrics.\nCheck your connection.",
-}
+# Translation targets offered in the settings view, as in the original plugin.
+LANGUAGES: list[tuple[str, str]] = [
+    ("pt-BR", "PT-BR"),
+    ("pt-PT", "PT-PT"),
+    ("en", "EN"),
+    ("es", "ES"),
+    ("fr", "FR"),
+    ("de", "DE"),
+    ("it", "IT"),
+    ("ja", "JA"),
+    ("ko", "KO"),
+    ("zh-CN", "ZH"),
+    ("ru", "RU"),
+]
 
-STATUS_LABELS: dict[str, str] = {
-    "loading": "fetching lyrics…",
-    "plain": "unsynced lyrics",
-    "notfound": "no lyrics found",
-    "instrumental": "instrumental",
-    "error": "network error",
+# Popup text. Remote strings never go through here.
+STRINGS: dict[str, dict[str, str]] = {
+    "en": {
+        "empty_noplayer": "No player running.\nStart something and press play.",
+        "empty_loading": "Fetching lyrics…",
+        "empty_notfound": "No lyrics found on LRCLIB.",
+        "empty_instrumental": "Instrumental.",
+        "empty_error": "Could not fetch the lyrics.\nCheck your connection.",
+        "status_loading": "fetching lyrics…",
+        "status_plain": "unsynced lyrics",
+        "status_notfound": "no lyrics found",
+        "status_instrumental": "instrumental",
+        "status_error": "network error",
+        "status_translating": "translating…",
+        "status_translate_error": "translation failed",
+        "status_estimated": "estimated timing",
+        "nothing_playing": "Nothing playing",
+        "unknown_track": "Unknown track",
+        "volume": "Volume",
+        "try_again": "Try again",
+        "settings": "Settings",
+        "settings_tooltip": "Super Player settings",
+        "back": "Back",
+        "player": "Player",
+        "auto": "Automatic",
+        "romanize": "Romanization",
+        "below": "Below the line",
+        "replace": "Instead of the line",
+        "translate": "Translation",
+        "translate_to": "Translate to",
+        "lyrics": "Lyrics",
+        "bar": "Bar",
+        "bar_lyric": "Lyric line",
+        "bar_track": "Track",
+        "bar_icon": "Icon only",
+        "show_progress": "Progress line",
+        "hide_when_no_lyrics": "Hide without lyrics",
+        "on": "On",
+        "off": "Off",
+        "hint_pykakasi": "Japanese readings with pykakasi; kana, Hangul, Cyrillic and Greek with built-in tables.",
+        "hint_builtin": "Built-in tables: kana, Hangul, Cyrillic and Greek. Install pykakasi for kanji readings.",
+        "hint_translating": "Translating the lyrics…",
+        "hint_translate_error": "Translation failed (Google Translate). The original lyrics are kept.",
+        "hint_translate_ok": "Translated with Google Translate, cached per track.",
+        "hint_translate_off": "Only contacts Google Translate while translation is on.",
+    },
+    "pt": {
+        "empty_noplayer": "Nenhum player aberto.\nAbra algum e dê play.",
+        "empty_loading": "Buscando a letra…",
+        "empty_notfound": "Nenhuma letra encontrada no LRCLIB.",
+        "empty_instrumental": "Instrumental.",
+        "empty_error": "Não foi possível buscar a letra.\nVerifique a conexão.",
+        "status_loading": "buscando letra…",
+        "status_plain": "letra sem sincronia",
+        "status_notfound": "letra não encontrada",
+        "status_instrumental": "instrumental",
+        "status_error": "erro de rede",
+        "status_translating": "traduzindo…",
+        "status_translate_error": "falha na tradução",
+        "status_estimated": "tempo estimado",
+        "nothing_playing": "Nada tocando",
+        "unknown_track": "Faixa desconhecida",
+        "volume": "Volume",
+        "try_again": "Tentar de novo",
+        "settings": "Configurações",
+        "settings_tooltip": "Configurações do Super Player",
+        "back": "Voltar",
+        "player": "Player",
+        "auto": "Automático",
+        "romanize": "Romanização",
+        "below": "Abaixo da linha",
+        "replace": "No lugar da linha",
+        "translate": "Tradução",
+        "translate_to": "Traduzir para",
+        "lyrics": "Letra",
+        "bar": "Barra",
+        "bar_lyric": "Linha da letra",
+        "bar_track": "Faixa",
+        "bar_icon": "Só o ícone",
+        "show_progress": "Linha de progresso",
+        "hide_when_no_lyrics": "Ocultar sem letra",
+        "on": "Ligado",
+        "off": "Desligado",
+        "hint_pykakasi": "Leituras do japonês com pykakasi; kana, hangul, cirílico e grego com tabelas internas.",
+        "hint_builtin": "Tabelas internas: kana, hangul, cirílico e grego. Instale o pykakasi para ler kanji.",
+        "hint_translating": "Traduzindo a letra…",
+        "hint_translate_error": "A tradução falhou (Google Tradutor). A letra original foi mantida.",
+        "hint_translate_ok": "Traduzido com o Google Tradutor, em cache por faixa.",
+        "hint_translate_off": "Só acessa o Google Tradutor com a tradução ligada.",
+    },
 }
 
 
@@ -365,6 +469,105 @@ class AbsoluteSlider(QSlider):
         ev.accept()
 
 
+class ToggleSwitch(QAbstractButton):
+    """A painted on/off switch with a sliding knob.
+
+    Colors follow the palette (Highlight when on), and CSS can override them with
+    ``qproperty-onColor``, ``qproperty-offColor`` and ``qproperty-knobColor``.
+    """
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedSize(38, 22)
+        self._offset = 0.0
+        self._on_color = QColor()
+        self._off_color = QColor()
+        self._knob_color = QColor()
+        self._anim = QPropertyAnimation(self, b"offset", self)
+        self._anim.setDuration(140)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.toggled.connect(self._animate)
+
+    def _get_offset(self) -> float:
+        return self._offset
+
+    def _set_offset(self, value: float) -> None:
+        self._offset = value
+        self.update()
+
+    offset: float = pyqtProperty(float, fget=_get_offset, fset=_set_offset)
+
+    def _get_on(self) -> QColor:
+        return self._on_color
+
+    def _set_on(self, color: QColor) -> None:
+        self._on_color = QColor(color)
+        self.update()
+
+    def _get_off(self) -> QColor:
+        return self._off_color
+
+    def _set_off(self, color: QColor) -> None:
+        self._off_color = QColor(color)
+        self.update()
+
+    def _get_knob(self) -> QColor:
+        return self._knob_color
+
+    def _set_knob(self, color: QColor) -> None:
+        self._knob_color = QColor(color)
+        self.update()
+
+    onColor: QColor = pyqtProperty(QColor, fget=_get_on, fset=_set_on)
+    offColor: QColor = pyqtProperty(QColor, fget=_get_off, fset=_set_off)
+    knobColor: QColor = pyqtProperty(QColor, fget=_get_knob, fset=_set_knob)
+
+    def set_checked_quietly(self, checked: bool) -> None:
+        """Reflect the setting without emitting clicked; the knob jumps to place."""
+        self.blockSignals(True)
+        self.setChecked(checked)
+        self.blockSignals(False)
+        self._anim.stop()
+        self._set_offset(1.0 if checked else 0.0)
+
+    def _animate(self, checked: bool) -> None:
+        self._anim.stop()
+        self._anim.setStartValue(self._offset)
+        self._anim.setEndValue(1.0 if checked else 0.0)
+        self._anim.start()
+
+    @override
+    def sizeHint(self) -> QSize:
+        return QSize(38, 22)
+
+    @override
+    def paintEvent(self, e: QPaintEvent | None) -> None:
+        palette = self.palette()
+        on = self._on_color if self._on_color.isValid() else palette.color(QPalette.ColorRole.Highlight)
+        off = self._off_color if self._off_color.isValid() else palette.color(QPalette.ColorRole.Mid)
+        knob = self._knob_color if self._knob_color.isValid() else QColor(255, 255, 255)
+        track = QColor(
+            round(off.red() + (on.red() - off.red()) * self._offset),
+            round(off.green() + (on.green() - off.green()) * self._offset),
+            round(off.blue() + (on.blue() - off.blue()) * self._offset),
+        )
+        if not self.isEnabled():
+            track.setAlpha(90)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(track)
+        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        painter.drawRoundedRect(rect, rect.height() / 2, rect.height() / 2)
+        diameter = rect.height() - 6
+        x = rect.left() + 3 + (rect.width() - diameter - 6) * self._offset
+        painter.setBrush(knob)
+        painter.drawEllipse(QRectF(x, rect.top() + 3, diameter, diameter))
+        painter.end()
+
+
 class LyricLineWidget(QFrame):
     """One line in the popup: original text, optional romanization and translation."""
 
@@ -433,6 +636,11 @@ class SuperPlayerWidget(BaseWidget):
         except RuntimeError:
             self._loop = None
 
+        # config.yaml values are the defaults; settings saved from the popup override them.
+        self._base_config = config
+        self._sessions: list[SessionState] = []
+        self._translate_lang = ""
+
         self.media = WindowsMedia()
         self._worker = LyricsWorker.instance()
         self._volume = AppVolume()
@@ -461,6 +669,9 @@ class SuperPlayerWidget(BaseWidget):
         self._line_widgets: list[LyricLineWidget] = []
         self._cover_key = ""
         self._cover_pixmap: QPixmap | None = None
+        self._settings_open = False
+        self._chips: dict[str, list[tuple[str, QPushButton]]] = {}
+        self._switches: dict[str, QAbstractButton] = {}
 
         self._build_bar()
 
@@ -480,6 +691,7 @@ class SuperPlayerWidget(BaseWidget):
         self.register_callback("prev_track", self._prev_track)
         self.register_callback("toggle_mute", self._toggle_mute)
         self.register_callback("reload_lyrics", self._reload)
+        self.register_callback("open_settings", self._open_settings)
         self.callback_left = self.config.callbacks.on_left
         self.callback_middle = self.config.callbacks.on_middle
         self.callback_right = self.config.callbacks.on_right
@@ -490,7 +702,54 @@ class SuperPlayerWidget(BaseWidget):
         self.media.media_data_changed.connect(self._on_media_data_changed)
 
         self.hide()
+        # widget_name is set by the builder after __init__, so saved settings load next tick.
+        QTimer.singleShot(0, self._load_saved_settings)
         QTimer.singleShot(0, self.media.force_update)
+
+    # ------------------------------------------------------------- settings
+    def _t(self, key: str) -> str:
+        return STRINGS.get(self.config.ui_language, STRINGS["en"]).get(key) or STRINGS["en"][key]
+
+    def _settings_key(self) -> str:
+        return self.widget_name or "super_player"
+
+    def _load_saved_settings(self) -> None:
+        overrides = load_state(state_path()).get(self._settings_key(), {})
+        if overrides:
+            self._apply_settings(apply_overrides(self._base_config, overrides), persist=False)
+
+    def update_settings(self, **changes: Any) -> None:
+        """Change settings from the popup: applied live and saved to super-player.json."""
+        self._apply_settings(apply_overrides(self.config, changes), persist=True)
+
+    def _apply_settings(self, new: SuperPlayerConfig, persist: bool) -> None:
+        old = self.config
+        self.config = new
+        if persist:
+            # Only what differs from config.yaml, so editing config.yaml later still counts.
+            overrides = {
+                key: getattr(new, key) for key in EDITABLE_KEYS if getattr(new, key) != getattr(self._base_config, key)
+            }
+            try:
+                save_overrides(state_path(), self._settings_key(), overrides)
+            except OSError as e:
+                logger.error("Could not save the Super Player settings: %s", e)
+
+        if new.translate != old.translate:
+            self._translate_rid = 0
+            self._translate_status = ""
+            for line in self._lines:
+                line.translated = ""
+            self._schedule_translate()
+        if new.romanize != old.romanize:
+            self._schedule_romanize()
+        if new.source != old.source:
+            self.media.force_update()
+
+        self._rebuild_popup_lyrics()
+        self._refresh_bar()
+        self._refresh_settings()
+        self._refresh_popup()
 
     # ------------------------------------------------------------------ bar
     def _build_bar(self) -> None:
@@ -584,12 +843,13 @@ class SuperPlayerWidget(BaseWidget):
         session = self._session
         text = session.title + (f" — {session.artist}" if session.artist else "")
         # The tooltip label may render rich text; remote strings are escaped.
-        set_tooltip(self, html.escape(text or "Unknown track"))
+        set_tooltip(self, html.escape(text or self._t("unknown_track")))
 
     # --------------------------------------------------------------- player
     @pyqtSlot(dict)
     def _on_media_data_changed(self, trackers: dict[str, SessionState]) -> None:
         sessions = list(trackers.values())
+        self._sessions = sessions
         system_current = next((s.app_id for s in sessions if s.is_current), None)
         session = pick_session(sessions, self.config.source, system_current, resolve_source_app_name)
 
@@ -622,6 +882,7 @@ class SuperPlayerWidget(BaseWidget):
         self._lines = []
         self._lrclib_duration = 0.0
         self._lyrics_rid = self._translate_rid = self._romanize_rid = 0
+        self._translate_lang = ""
         self._translate_status = ""
         self._debounce.stop()
         if session is None:
@@ -682,7 +943,7 @@ class SuperPlayerWidget(BaseWidget):
         return [line.text for line in self._lines]
 
     def _schedule_romanize(self) -> None:
-        if self.config.romanize == "off" or not self._lines:
+        if self.config.romanize == "off" or not self._lines or self._romanize_rid:
             return
         cached = _romanization_cache.get(self._key)
         if isinstance(cached, list):
@@ -695,6 +956,7 @@ class SuperPlayerWidget(BaseWidget):
     def _on_romanization_ready(self, request_id: int, result: object) -> None:
         if request_id != self._romanize_rid or not isinstance(result, list):
             return
+        self._romanize_rid = 0
         _romanization_cache.put(self._key, result)
         self._merge("romanized", result)  # pyright: ignore[reportUnknownArgumentType]
         self._rebuild_popup_lyrics()
@@ -710,19 +972,24 @@ class SuperPlayerWidget(BaseWidget):
             self._merge("translated", cached)  # pyright: ignore[reportUnknownArgumentType]
             return
         self._translate_status = "loading"
+        self._translate_lang = language
         self._translate_rid = self._worker.next_request_id()
         self._worker.translate(self._translate_rid, self._texts(), language)
+        self._refresh_settings()
 
     @pyqtSlot(int, object)
     def _on_translation_ready(self, request_id: int, result: object) -> None:
         if request_id != self._translate_rid:
             return
+        self._translate_rid = 0
         if not isinstance(result, list):
             self._translate_status = "error"  # keep the original lyrics
             self._refresh_popup()
+            self._refresh_settings()
             return
-        _translation_cache.put(f"{self._key}|{self.config.translate.strip()}", result)
+        _translation_cache.put(f"{self._key}|{self._translate_lang}", result)
         self._translate_status = "ok"
+        self._refresh_settings()
         self._merge("translated", result)  # pyright: ignore[reportUnknownArgumentType]
         self._rebuild_popup_lyrics()
 
@@ -794,7 +1061,7 @@ class SuperPlayerWidget(BaseWidget):
         new = current + (step if a0.angleDelta().y() > 0 else -step)
         self._set_volume(new)
         if self.config.tooltip:
-            set_tooltip(self, f"Volume {round(max(0.0, min(1.0, new)) * 100)}%")
+            set_tooltip(self, f"{self._t('volume')} {round(max(0.0, min(1.0, new)) * 100)}%")
             show_tooltip_now(self)
             self._tooltip_reset.start()
         a0.accept()
@@ -810,8 +1077,19 @@ class SuperPlayerWidget(BaseWidget):
             return
         self._show_popup()
 
-    def _show_popup(self) -> None:
+    def _open_settings(self) -> None:
+        """Right click: open the popup straight on its settings view, or close it."""
+        if self._popup is not None and is_valid_qobject(self._popup) and self._popup.isVisible():
+            if self._settings_open:
+                self._popup.hide_animated()
+            else:
+                self._show_settings(True)
+            return
+        self._show_popup(settings=True)
+
+    def _show_popup(self, settings: bool = False) -> None:
         cfg = self.config.popup
+        self._settings_open = False
         popup = PopupWidget(self, cfg.blur, cfg.round_corners, cfg.round_corners_type, cfg.border_color)
         popup.setProperty("class", "super-player-popup")
         popup.setFixedWidth(cfg.width)
@@ -863,7 +1141,22 @@ class SuperPlayerWidget(BaseWidget):
         controls.addWidget(self._status_label, 1)
         info.addLayout(controls)
         header_layout.addLayout(info, 1)
+        self._settings_btn = ClickLabel(
+            icons.settings, "btn settings", lambda: self._show_settings(not self._settings_open)
+        )
+        set_tooltip(self._settings_btn, self._t("settings_tooltip"))
+        header_layout.addWidget(self._settings_btn, 0, Qt.AlignmentFlag.AlignTop)
         layout.addWidget(header)
+
+        # Two views under the header: the lyrics, and the settings.
+        self._lyrics_page = QWidget()
+        lyrics_page_layout = QVBoxLayout(self._lyrics_page)
+        lyrics_page_layout.setContentsMargins(0, 0, 0, 0)
+        lyrics_page_layout.setSpacing(0)
+        layout.addWidget(self._lyrics_page)
+        self._settings_page = self._build_settings_page()
+        self._settings_page.setVisible(False)
+        layout.addWidget(self._settings_page)
 
         # The volume bar is revealed while the mute button or the bar itself is hovered.
         self._volume_hide = QTimer(popup)
@@ -892,7 +1185,7 @@ class SuperPlayerWidget(BaseWidget):
         self._scroll_anim = QPropertyAnimation(self._scroll.verticalScrollBar(), b"value", popup)
         self._scroll_anim.setDuration(400)
         self._scroll_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        layout.addWidget(self._scroll)
+        lyrics_page_layout.addWidget(self._scroll)
 
         # Empty state
         self._empty = QFrame()
@@ -904,19 +1197,19 @@ class SuperPlayerWidget(BaseWidget):
         self._empty_label.setWordWrap(True)
         empty_layout.addStretch(1)
         empty_layout.addWidget(self._empty_label)
-        self._retry_btn = QPushButton("Try again")
+        self._retry_btn = QPushButton(self._t("try_again"))
         self._retry_btn.setProperty("class", "retry")
         self._retry_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._retry_btn.clicked.connect(self._reload)
         empty_layout.addWidget(self._retry_btn, 0, Qt.AlignmentFlag.AlignHCenter)
         empty_layout.addStretch(1)
         self._empty.setFixedHeight(cfg.lyrics_height)
-        layout.addWidget(self._empty)
+        lyrics_page_layout.addWidget(self._empty)
 
         # Seek bar: click anywhere to jump, press and drag to scrub
         self._seek = AbsoluteSlider("seek-slider")
         self._seek.committed.connect(self._on_seek_committed)
-        layout.addWidget(self._seek)
+        lyrics_page_layout.addWidget(self._seek)
 
         # A failed lookup is worth another try as soon as the popup opens.
         if self._status in ("error", "notfound") and self._key:
@@ -925,6 +1218,9 @@ class SuperPlayerWidget(BaseWidget):
         self._rebuild_popup_lyrics()
         self._refresh_popup()
         self._refresh_volume()
+        self._refresh_settings()
+        if settings:
+            self._show_settings(True, adjust=False)
         popup.adjustSize()
         popup.setPosition(cfg.alignment, cfg.direction, cfg.offset_left, cfg.offset_top)
         popup.show()
@@ -936,6 +1232,9 @@ class SuperPlayerWidget(BaseWidget):
             return  # an older popup finished closing after a new one opened
         self._popup = None
         self._line_widgets = []
+        self._chips = {}
+        self._switches = {}
+        self._settings_open = False
         self._label.set_paused(False)
 
     @override
@@ -973,7 +1272,7 @@ class SuperPlayerWidget(BaseWidget):
             return
         session = self._session
         icons = self.config.icons
-        title = session.title if session and session.title else "Nothing playing"
+        title = session.title if session and session.title else self._t("nothing_playing")
         artist = session.artist if session else ""
         metrics = QFontMetrics(self._title_label.font())
         width = max(40, self._title_label.width())
@@ -989,13 +1288,13 @@ class SuperPlayerWidget(BaseWidget):
         self._set_class(self._prev_btn, f"btn prev{'' if session and session.controls_prev_enabled else ' disabled'}")
         self._set_class(self._next_btn, f"btn next{'' if session and session.controls_next_enabled else ' disabled'}")
 
-        status = STATUS_LABELS.get(self._status, "")
+        status = self._t(f"status_{self._status}") if f"status_{self._status}" in STRINGS["en"] else ""
         if self._translate_status == "loading":
-            status = status or "translating…"
+            status = status or self._t("status_translating")
         elif self._translate_status == "error":
-            status = status or "translation failed"
+            status = status or self._t("status_translate_error")
         elif session is not None and not has_timeline(session) and self._status == "synced":
-            status = "estimated timing"  # no timeline from the player: local clock
+            status = self._t("status_estimated")  # no timeline from the player: local clock
         self._status_label.setText(status)
 
         if self._cover is not None:
@@ -1034,15 +1333,21 @@ class SuperPlayerWidget(BaseWidget):
         while self._lyrics_layout.count():
             item = self._lyrics_layout.takeAt(0)
             if item is not None and (widget := item.widget()) is not None:
+                # Hide now: deleteLater runs later, and a stale line must not paint or take space.
+                widget.hide()
                 widget.deleteLater()
         self._line_widgets = []
 
         has_lines = bool(self._lines)
-        self._scroll.setVisible(has_lines)
-        self._empty.setVisible(not has_lines)
+        # Hide the outgoing view first, so the page never lays out both at once and the
+        # popup does not keep their combined height.
+        outgoing, incoming = (self._empty, self._scroll) if has_lines else (self._scroll, self._empty)
+        outgoing.setVisible(False)
+        incoming.setVisible(True)
+        self._fit_popup()
         if not has_lines:
             status = self._status if self._session is not None else "noplayer"
-            self._empty_label.setText(EMPTY_MESSAGES.get(status, ""))
+            self._empty_label.setText(self._t(f"empty_{status}") if f"empty_{status}" in STRINGS["en"] else "")
             self._retry_btn.setVisible(status in ("error", "notfound") and bool(self._key))
             return
 
@@ -1098,3 +1403,249 @@ class SuperPlayerWidget(BaseWidget):
         self._scroll_anim.setStartValue(bar.value())
         self._scroll_anim.setEndValue(target)
         self._scroll_anim.start()
+
+    def _fit_popup(self) -> None:
+        """Shrink or grow the popup to the visible view."""
+        if self._popup is None or not self._popup_open():
+            return
+        for page in (self._lyrics_page, self._settings_page):
+            for child in page.findChildren(QWidget):
+                child.updateGeometry()
+            page.updateGeometry()
+        layout = self._popup.layout()
+        if layout is not None:
+            layout.invalidate()
+            layout.activate()
+        self._popup.adjustSize()
+
+    # -------------------------------------------------------- settings view
+    def _show_settings(self, show: bool, adjust: bool = True) -> None:
+        if not self._popup_open() or self._popup is None:
+            return
+        self._settings_open = show
+        if show:
+            self._rebuild_source_chips()
+            self._refresh_settings()
+        self._lyrics_page.setVisible(not show)
+        self._settings_page.setVisible(show)
+        self._set_class(self._settings_btn, f"btn settings{' active' if show else ''}")
+        if adjust:
+            self._fit_popup()
+        if not show:
+            QTimer.singleShot(0, lambda: self._scroll_to_current(animated=False))
+
+    def _build_settings_page(self) -> QFrame:
+        page = QFrame()
+        page.setProperty("class", "settings")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 12, 0, 0)
+        layout.setSpacing(10)
+
+        top = QHBoxLayout()
+        top.setContentsMargins(2, 0, 0, 0)
+        top.addWidget(plain_label(self._t("settings"), "settings-title"), 1)
+        back = QPushButton(f"{self.config.icons.back}  {self._t('back')}")
+        back.setProperty("class", "back")
+        back.setCursor(Qt.CursorShape.PointingHandCursor)
+        back.clicked.connect(lambda: self._show_settings(False))
+        top.addWidget(back)
+        layout.addLayout(top)
+
+        # Player: filled with the running sessions every time the view opens.
+        player = self._section(layout, self._t("player"))
+        self._source_grid = QGridLayout()
+        self._source_grid.setSpacing(6)
+        player.addLayout(self._source_grid)
+
+        lyrics = self._section(layout, self._t("lyrics"))
+        self._romanize_hint = self._switch_row(lyrics, "romanize", self._t("romanize"), self._on_romanize_switch)
+        lyrics.addLayout(
+            self._chip_grid(
+                "romanize_mode",
+                [("below", self._t("below")), ("replace", self._t("replace"))],
+                lambda value: self.update_settings(romanize=value),
+                columns=2,
+                segmented=True,
+            )
+        )
+        lyrics.addWidget(self._divider())
+        self._translate_hint = self._switch_row(lyrics, "translate", self._t("translate"), self._on_translate_switch)
+        lyrics.addLayout(self._chip_grid("translate_to", LANGUAGES, self._on_language_chip, columns=6))
+
+        bar = self._section(layout, self._t("bar"))
+        bar.addLayout(
+            self._chip_grid(
+                "bar_label",
+                [("lyric", self._t("bar_lyric")), ("track", self._t("bar_track")), ("icon", self._t("bar_icon"))],
+                lambda value: self.update_settings(bar_label=value),
+                columns=3,
+                segmented=True,
+            )
+        )
+        self._switch_row(
+            bar, "show_progress", self._t("show_progress"), lambda on: self.update_settings(show_progress=on)
+        )
+        self._switch_row(
+            bar,
+            "hide_when_no_lyrics",
+            self._t("hide_when_no_lyrics"),
+            lambda on: self.update_settings(hide_when_no_lyrics=on),
+        )
+        return page
+
+    @staticmethod
+    def _section(parent: QVBoxLayout, title: str) -> QVBoxLayout:
+        """A titled card; returns the layout its rows go into."""
+        parent.addWidget(plain_label(title.upper(), "section-title"))
+        card = QFrame()
+        card.setProperty("class", "section")
+        body = QVBoxLayout(card)
+        body.setContentsMargins(12, 10, 12, 12)
+        body.setSpacing(8)
+        parent.addWidget(card)
+        return body
+
+    @staticmethod
+    def _divider() -> QFrame:
+        line = QFrame()
+        line.setProperty("class", "divider")
+        line.setFixedHeight(1)
+        return line
+
+    def _chip(
+        self, group: str, value: str, text: str, on_click: Callable[[str], None], class_name: str = "chip"
+    ) -> QPushButton:
+        chip = QPushButton(text)
+        chip.setProperty("class", class_name)
+        chip.setCheckable(True)
+        chip.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        def clicked(_checked: bool = False) -> None:
+            on_click(value)
+
+        chip.clicked.connect(clicked)
+        self._chips.setdefault(group, []).append((value, chip))
+        return chip
+
+    def _chip_grid(
+        self,
+        group: str,
+        options: list[tuple[str, str]],
+        on_click: Callable[[str], None],
+        columns: int,
+        segmented: bool = False,
+    ) -> QGridLayout:
+        """Option buttons; ``segmented`` joins them into one bar (first/last get rounded ends)."""
+        grid = QGridLayout()
+        grid.setSpacing(0 if segmented else 6)
+        for i, (value, text) in enumerate(options):
+            class_name = "chip"
+            if segmented:
+                edge = (" first" if i == 0 else "") + (" last" if i == len(options) - 1 else "")
+                class_name = f"segment{edge}"
+            grid.addWidget(self._chip(group, value, text, on_click, class_name), i // columns, i % columns)
+        return grid
+
+    def _switch_row(self, parent: QVBoxLayout, key: str, text: str, on_toggle: Callable[[bool], None]) -> QLabel:
+        """Label, a description line under it, and a switch on the right. Returns the description."""
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+        texts = QVBoxLayout()
+        texts.setSpacing(1)
+        texts.addWidget(plain_label(text, "setting-label"))
+        description = plain_label("", "setting-desc")
+        description.setWordWrap(True)
+        description.setVisible(False)
+        texts.addWidget(description)
+        row.addLayout(texts, 1)
+        switch = ToggleSwitch()
+        switch.setProperty("class", "switch")
+        switch.clicked.connect(on_toggle)
+        self._switches[key] = switch
+        row.addWidget(switch, 0, Qt.AlignmentFlag.AlignVCenter)
+        parent.addLayout(row)
+        return description
+
+    def _rebuild_source_chips(self) -> None:
+        while self._source_grid.count():
+            item = self._source_grid.takeAt(0)
+            if item is not None and (widget := item.widget()) is not None:
+                widget.deleteLater()
+        self._chips["source"] = []
+        options = [("auto", self._t("auto"))]
+        for session in self._sessions:
+            options.append((session.app_id, resolve_source_app_name(session.app_id) or session.app_id))
+        pinned = self.config.source
+        if pinned.strip().lower() not in ("", "auto") and not any(value == pinned for value, _ in options):
+            options.append((pinned, pinned))  # pinned in config but not running now
+        for i, (value, text) in enumerate(options):
+            edge = (" first" if i == 0 else "") + (" last" if i == len(options) - 1 else "")
+            chip = self._chip("source", value, text, lambda v: self.update_settings(source=v), f"segment{edge}")
+            self._source_grid.addWidget(chip, 0, i)
+        self._source_grid.setSpacing(0)
+        self._refresh_settings()
+
+    def _on_romanize_switch(self, on: bool) -> None:
+        mode = self._base_config.romanize if self._base_config.romanize != "off" else "below"
+        self.update_settings(romanize=mode if on else "off")
+
+    def _on_translate_switch(self, on: bool) -> None:
+        # Network access to the translation endpoint only happens while this is on.
+        self.update_settings(translate=self.config.translate_to if on else "off")
+
+    def _on_language_chip(self, language: str) -> None:
+        if self.config.translate.lower() == "off":
+            self.update_settings(translate_to=language)
+        else:
+            self.update_settings(translate_to=language, translate=language)
+
+    def _refresh_settings(self) -> None:
+        if not self._popup_open() or not self._switches:
+            return
+        cfg = self.config
+        selected = {
+            "source": cfg.source if cfg.source.strip().lower() not in ("", "auto") else "auto",
+            "romanize_mode": cfg.romanize,
+            "translate_to": cfg.translate_to,
+            "bar_label": cfg.bar_label,
+        }
+        for group, chips in self._chips.items():
+            for value, chip in chips:
+                if not is_valid_qobject(chip):
+                    continue
+                chip.setChecked(value.casefold() == selected.get(group, "").casefold())
+                refresh_widget_style(chip)
+        states = {
+            "romanize": cfg.romanize != "off",
+            "translate": cfg.translate.lower() != "off",
+            "show_progress": cfg.show_progress,
+            "hide_when_no_lyrics": cfg.hide_when_no_lyrics,
+        }
+        for key, switch in self._switches.items():
+            on = states.get(key, False)
+            if isinstance(switch, ToggleSwitch) and switch.isChecked() != on:
+                switch.set_checked_quietly(on)
+            switch.setText(self._t("on") if on else self._t("off"))  # accessible name, not painted
+            switch.setAccessibleName(switch.text())
+        for _, chip in self._chips.get("romanize_mode", []):
+            chip.setVisible(states["romanize"])
+        for _, chip in self._chips.get("translate_to", []):
+            chip.setVisible(states["translate"])
+        self._romanize_hint.setText(
+            (self._t("hint_pykakasi") if pykakasi_installed() else self._t("hint_builtin"))
+            if states["romanize"]
+            else ""
+        )
+        self._romanize_hint.setVisible(states["romanize"])
+        hint = {
+            "loading": "hint_translating",
+            "error": "hint_translate_error",
+            "ok": "hint_translate_ok",
+        }.get(self._translate_status, "hint_translate_off" if not states["translate"] else "")
+        self._translate_hint.setText(self._t(hint) if hint else "")
+        self._translate_hint.setVisible(bool(hint))
+        self._set_class(self._translate_hint, f"setting-desc{' error' if self._translate_status == 'error' else ''}")
+        if self._settings_open:
+            # Rows shown or hidden above post their layout requests; fit once they are handled.
+            QTimer.singleShot(0, self._fit_popup)

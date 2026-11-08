@@ -75,6 +75,13 @@ test = [
 packaging = [
     "cx-freeze==8.6.4"
 ]
+# Optional: Japanese kanji readings for the Super Player romanization
+lyrics = [
+    "pykakasi==2.3.0",
+    "jaconv==0.5.0",
+    "Deprecated==3.0.1",
+    "wrapt==2.5.2",
+]
 [tool.hatch.metadata]
 allow-direct-references = true
 
